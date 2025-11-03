@@ -109,9 +109,19 @@ class Timings(BaseModel):
     prewarm_s: int = Field(default=60, ge=10, le=300, description="Pre-warm time in seconds")
     poll_fast_period_s: float = Field(default=5.0, ge=1.0, le=20.0, description="Fast polling period")
     total_poll_deadline_s: int = Field(default=20, ge=5, le=60, description="Total polling deadline")
+    poll_deadline_extension_s: int = Field(default=15, ge=0, le=60, description="Poll deadline extension after addUser (seconds)")
     debounce_after_seen_s: float = Field(default=0.6, ge=0.1, le=5.0, description="Debounce after device seen")
     retry_404_delay_s: float = Field(default=0.7, ge=0.1, le=5.0, description="Delay before 404 retry")
     failover_fire_after_s: float = Field(default=2.0, ge=0.5, le=10.0, description="Failover timeout")
+    adduser_wait_after_s: float = Field(default=5.0, ge=0, le=30.0, description="Wait time after addUser before checking devices")
+    mdns_discovery_timeout_s: float = Field(default=1.5, ge=0.5, le=10.0, description="mDNS discovery timeout")
+    getinfo_timeout_s: float = Field(default=1.5, ge=0.5, le=10.0, description="getInfo request timeout")
+    adduser_timeout_s: float = Field(default=2.5, ge=0.5, le=10.0, description="addUser request timeout")
+    device_info_timeout_s: float = Field(default=2.0, ge=0.5, le=10.0, description="getDeviceInfo request timeout")
+    verify_device_ready_timeout_s: float = Field(default=0.5, ge=0.1, le=5.0, description="verifyDeviceReady timeout")
+    confirmation_sleep_s: float = Field(default=0.2, ge=0.1, le=1.0, description="Sleep time in confirmation loop")
+    poll_sleep_fast_s: float = Field(default=0.5, ge=0.1, le=2.0, description="Sleep time during fast polling")
+    poll_sleep_slow_s: float = Field(default=1.0, ge=0.1, le=5.0, description="Sleep time during slow polling")
 
 
 class PlaybackMetrics(BaseModel):

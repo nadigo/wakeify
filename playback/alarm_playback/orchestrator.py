@@ -213,6 +213,8 @@ class AlarmPlaybackEngine:
                     log_phase_end(logger, "webapi_check", target_name, metrics.discovered_ms, True)
                     state = State.CLOUD_VISIBLE
                     
+                    # Skip debounce - device is already active via Web API, no need to wait
+                    
                     # Skip directly to staging and playback (use default volume if no profile)
                     try:
                         target = self._get_target_profile(target_name)
@@ -236,6 +238,31 @@ class AlarmPlaybackEngine:
                     
                     metrics.play_ms = int((time.time() - play_start) * 1000)
                     log_phase_end(logger, "play", target_name, metrics.play_ms, True)
+                    
+                    # Warn if play took longer than expected
+                    if metrics.play_ms > 1000:
+                        logger.warning(f"Play phase took {metrics.play_ms}ms (expected <1000ms) - network may be slow")
+                    
+                    # Confirm playback started (like other paths do)
+                    logger.info(f"Playback started, confirming within {self.cfg.timings.failover_fire_after_s}s...")
+                    confirmation_deadline = time.time() + self.cfg.timings.failover_fire_after_s
+                    playback_confirmed = False
+                    
+                    while time.time() < confirmation_deadline:
+                        try:
+                            if verify_device_ready(self.api, cloud_device.id, timeout_s=self.cfg.timings.verify_device_ready_timeout_s):
+                                logger.info(f"Playback confirmed for {target_name}")
+                                playback_confirmed = True
+                                break
+                            time.sleep(self.cfg.timings.confirmation_sleep_s)
+                        except Exception as e:
+                            logger.warning(f"Confirmation check failed: {e}")
+                            time.sleep(self.cfg.timings.confirmation_sleep_s)
+                    
+                    if not playback_confirmed:
+                        logger.warning(f"Playback not confirmed by T+{self.cfg.timings.failover_fire_after_s}s for {target_name} - but continuing as device may still be starting")
+                    
+                    state = State.PLAYING
                     
                     # Success via Web API
                     metrics.branch = "webapi_direct"
@@ -350,7 +377,7 @@ class AlarmPlaybackEngine:
             log_phase_start(logger, "discovery", target_name)
             discovery_start = time.time()
             
-            discovery_result = mdns_discover_connect(target.name, timeout_s=1.5)
+            discovery_result = mdns_discover_connect(target.name, timeout_s=self.cfg.timings.mdns_discovery_timeout_s)
             metrics.discovered_ms = int((time.time() - discovery_start) * 1000)
             
             # Update device profile with instance_name if discovered
@@ -394,7 +421,7 @@ class AlarmPlaybackEngine:
             getinfo_start = time.time()
             
             local_ok = get_info(discovery_result.ip, discovery_result.port, 
-                               discovery_result.cpath, timeout_s=1.5)
+                               discovery_result.cpath, timeout_s=self.cfg.timings.getinfo_timeout_s)
             metrics.getinfo_ms = int((time.time() - getinfo_start) * 1000)
             
             log_phase_end(logger, "getinfo", target_name, metrics.getinfo_ms, local_ok)
@@ -408,7 +435,21 @@ class AlarmPlaybackEngine:
             adduser_start = time.time()
             
             # Unified credentials for all devices - use token_manager for fresh token
+            # Refresh token before addUser to ensure it's valid
+            try:
+                self.api.token_manager.refresh_token_if_needed()
+                self.api._spotify = None  # Force recreation with fresh token
+            except Exception as e:
+                logger.warning(f"Token refresh before addUser failed (non-fatal): {e}")
+            
             access_token = self.api.token_manager.get_access_token()
+            
+            # Verify token is not empty
+            if not access_token or len(access_token.strip()) == 0:
+                logger.error(f"Invalid or empty access token for {target_name}")
+                raise ValueError("Access token is invalid or empty")
+            
+            logger.debug(f"Using access token for addUser (length: {len(access_token)})")
             
             # Try access_token mode first (more reliable for most devices)
             creds = {
@@ -423,7 +464,7 @@ class AlarmPlaybackEngine:
                 discovery_result.cpath, 
                 "access_token",  # Force access_token mode for all devices
                 creds, 
-                timeout_s=2.5
+                timeout_s=self.cfg.timings.adduser_timeout_s
             )
             
             # If access_token failed, try blob_clientKey mode as fallback
@@ -439,7 +480,7 @@ class AlarmPlaybackEngine:
                         discovery_result.cpath, 
                         "blob_clientKey",
                         blob_creds, 
-                        timeout_s=2.5
+                        timeout_s=self.cfg.timings.adduser_timeout_s
                     )
                 except Exception as e:
                     logger.debug(f"blob_clientKey mode also failed: {e}")
@@ -455,10 +496,91 @@ class AlarmPlaybackEngine:
             else:
                 logger.info(f"addUser succeeded for {target_name}, device should now be activated")
                 state = State.LOGGED_IN
+                # Refresh token to ensure we have a fresh token for device polling
+                try:
+                    self.api.token_manager.refresh_token_if_needed()
+                    # Force recreation of Spotify client with fresh token
+                    self.api._spotify = None
+                    logger.debug(f"Refreshed token after addUser for {target_name}")
+                except Exception as e:
+                    logger.warning(f"Token refresh after addUser failed (non-fatal): {e}")
+                
+                # Try to get updated device info after addUser - device name might have changed
+                try:
+                    from alarm_playback.zeroconf_client import get_device_info
+                    updated_info = get_device_info(discovery_result.ip, discovery_result.port, discovery_result.cpath, timeout_s=self.cfg.timings.device_info_timeout_s)
+                    if updated_info:
+                        # Extract potential device names from getInfo response
+                        name_fields = ['remoteName', 'displayName', 'name', 'deviceName']
+                        for field in name_fields:
+                            if field in updated_info and updated_info[field]:
+                                name_value = str(updated_info[field]).strip()
+                                if name_value and name_value not in target.spotify_device_names:
+                                    target.spotify_device_names.append(name_value)
+                                    logger.info(f"Learned device name '{name_value}' from getInfo after addUser")
+                except Exception as e:
+                    logger.debug(f"Failed to get device info after addUser (non-fatal): {e}")
+                
                 # Give device more time to register with Spotify after successful addUser
-                # Some devices take a few seconds to appear after authentication
-                logger.debug(f"Waiting 2 seconds for {target_name} to register with Spotify after addUser")
-                time.sleep(2.0)
+                # Some devices take several seconds to appear after authentication
+                wait_time = self.cfg.timings.adduser_wait_after_s
+                logger.info(f"Waiting {wait_time}s for {target_name} to register with Spotify after addUser")
+                time.sleep(wait_time)
+                
+                # Quick check if device appeared immediately after wait
+                try:
+                    devices = self.api.get_devices()
+                    cloud_device = self._pick_device(devices, target.name)
+                    if cloud_device:
+                        logger.info(f"Device {target_name} appeared immediately after addUser wait period")
+                        # Store this Spotify device name for future exact matching
+                        if cloud_device.name not in target.spotify_device_names:
+                            target.spotify_device_names.append(cloud_device.name)
+                            logger.info(f"✓ LEARNED: Stored Spotify device name '{cloud_device.name}' for device '{target_name}'")
+                        # Continue to staging and playback
+                        metrics.cloud_visible_ms = int((time.time() - total_start_time) * 1000)
+                        state = State.CLOUD_VISIBLE
+                        # Skip directly to staging
+                        time.sleep(self.cfg.timings.debounce_after_seen_s)
+                        
+                        log_phase_start(logger, "stage", target_name)
+                        stage_device(self.api, cloud_device.id, target.volume_preset)
+                        state = State.STAGED
+                        log_phase_end(logger, "stage", target_name, None, True)
+                        
+                        log_phase_start(logger, "play", target_name)
+                        play_start = time.time()
+                        start_play(self.api, cloud_device.id, self.cfg.context_uri,
+                                  retry_404_delay_s=self.cfg.timings.retry_404_delay_s,
+                                  shuffle=self.cfg.shuffle)
+                        metrics.play_ms = int((time.time() - play_start) * 1000)
+                        log_phase_end(logger, "play", target_name, metrics.play_ms, True)
+                        
+                        # Confirm playback
+                        confirmation_deadline = time.time() + self.cfg.timings.failover_fire_after_s
+                        while time.time() < confirmation_deadline:
+                            try:
+                                if verify_device_ready(self.api, cloud_device.id, timeout_s=self.cfg.timings.verify_device_ready_timeout_s):
+                                    logger.info(f"Playback confirmed for {target_name}")
+                                    break
+                                time.sleep(self.cfg.timings.confirmation_sleep_s)
+                            except Exception as e:
+                                logger.warning(f"Confirmation check failed: {e}")
+                                time.sleep(self.cfg.timings.confirmation_sleep_s)
+                        else:
+                            logger.error(f"Playback not confirmed by T+2s for {target_name}")
+                            return self._failover(metrics, target_name, "play_not_confirmed_t2")
+                        
+                        state = State.PLAYING
+                        metrics.branch = "primary_adduser_immediate"
+                        self._record_success(target_name)
+                        logger.info(f"Successfully completed alarm playback for {target_name} via addUser immediate")
+                        return metrics
+                    else:
+                        device_names = [d.name for d in devices] if devices else []
+                        logger.info(f"Device not yet visible after initial wait (available: {device_names}), continuing to poll...")
+                except Exception as e:
+                    logger.debug(f"Quick check after addUser failed (non-fatal): {e}")
             
             # If we get here, either getInfo succeeded or addUser succeeded
             if local_ok:
@@ -471,22 +593,82 @@ class AlarmPlaybackEngine:
             # Phase 6: Poll /devices until deadline
             log_phase_start(logger, "cloud_poll", target_name)
             cloud_poll_start = time.time()
-            deadline = time.time() + self.cfg.timings.total_poll_deadline_s
+            
+            # If addUser succeeded, extend the deadline since we know device was just authenticated
+            # Some devices take longer to appear in Spotify's API after authentication
+            base_deadline = self.cfg.timings.total_poll_deadline_s
+            if auth_ok:
+                extension = self.cfg.timings.poll_deadline_extension_s
+                extended_deadline = base_deadline + extension
+                logger.info(f"addUser succeeded - extending polling deadline from {base_deadline}s to {extended_deadline}s to allow device to register")
+            else:
+                extended_deadline = base_deadline
+            
+            deadline = time.time() + extended_deadline
             fast_until = time.time() + self.cfg.timings.poll_fast_period_s
             cloud_device = None
             
             first_attempt = True
+            attempt_count = 0
             while time.time() < deadline:
                 try:
+                    # Refresh token periodically during polling to ensure it's valid
+                    if attempt_count > 0 and attempt_count % 5 == 0:
+                        try:
+                            self.api.token_manager.refresh_token_if_needed()
+                            self.api._spotify = None  # Force recreation
+                        except Exception as e:
+                            logger.debug(f"Token refresh during polling failed (non-fatal): {e}")
+                    
                     devices = self.api.get_devices()
-                    # Log available devices on first attempt for debugging - ALWAYS log to see what Spotify reports
-                    if first_attempt:
+                    attempt_count += 1
+                    
+                    # Log available devices on first attempt and periodically for debugging
+                    if first_attempt or (attempt_count % 5 == 0):
                         device_names = [d.name for d in devices] if devices else []
                         matching_names = target.get_all_matching_names()
-                        logger.info(f"Available Spotify devices: {device_names}")
-                        logger.info(f"Looking for device '{target.name}' using stored names: {matching_names}")
-                        logger.info(f"Device profile instance_name: {target.instance_name}, spotify_device_names: {target.spotify_device_names}")
-                        first_attempt = False
+                        if first_attempt:
+                            logger.info(f"Available Spotify devices: {device_names}")
+                            logger.info(f"Looking for device '{target.name}' using stored names: {matching_names}")
+                            logger.info(f"Device profile instance_name: {target.instance_name}, spotify_device_names: {target.spotify_device_names}")
+                            first_attempt = False
+                        else:
+                            logger.debug(f"Poll attempt {attempt_count}: Available Spotify devices: {device_names}")
+                    
+                    # Log if we're getting empty device lists repeatedly
+                    if not devices or len(devices) == 0:
+                        if attempt_count == 1:
+                            # On first attempt, verify token and provide detailed diagnostics
+                            try:
+                                client = self.api._get_client()
+                                user_info = client.current_user()
+                                user_id = user_info.get('id', 'unknown')
+                                logger.warning(f"Spotify API returned empty device list - Token validated for user: {user_id}")
+                                logger.warning(f"  This account has no active devices visible via Spotify API")
+                                logger.warning(f"  Device may need manual authentication first via Spotify app")
+                                logger.warning(f"  Solution: Open Spotify app, select '{target_name}', play a song to authenticate")
+                            except Exception as e:
+                                logger.error(f"Token validation failed: {e}")
+                                logger.error(f"  This may indicate the token is invalid or expired")
+                        
+                        if attempt_count % 5 == 0:  # Log every 5th empty result to reduce spam
+                            remaining_time = deadline - time.time()
+                            logger.debug(f"Spotify API still returning empty device list (attempt {attempt_count}, {remaining_time:.1f}s remaining)")
+                            # Try to refresh token if we're getting empty results
+                            if attempt_count % 10 == 0:  # Only refresh token every 10th attempt
+                                try:
+                                    self.api.token_manager.refresh_token_if_needed()
+                                    self.api._spotify = None
+                                    logger.debug("Refreshed token due to empty device list")
+                                except Exception as e:
+                                    logger.debug(f"Token refresh failed: {e}")
+                    else:
+                        # Log available devices periodically even when not matching
+                        if attempt_count % 5 == 0 and attempt_count > 0:
+                            device_names = [d.name for d in devices]
+                            remaining_time = deadline - time.time()
+                            logger.debug(f"Poll attempt {attempt_count}: {len(devices)} devices available ({device_names}), {remaining_time:.1f}s remaining")
+                    
                     cloud_device = self._pick_device(devices, target.name)
                     
                     if cloud_device:
@@ -500,16 +682,29 @@ class AlarmPlaybackEngine:
                         break
                     
                     # Fast polling for first period, then slower
-                    sleep_time = 0.5 if time.time() < fast_until else 1.0
+                    sleep_time = self.cfg.timings.poll_sleep_fast_s if time.time() < fast_until else self.cfg.timings.poll_sleep_slow_s
                     time.sleep(sleep_time)
                     
                 except Exception as e:
                     log_error(logger, target_name, e, {"phase": "cloud_poll"})
-                    time.sleep(1.0)
+                    time.sleep(self.cfg.timings.poll_sleep_slow_s)
             
             metrics.cloud_visible_ms = int((time.time() - total_start_time) * 1000)
             
             if not cloud_device:
+                # Log final diagnostic information
+                try:
+                    final_devices = self.api.get_devices()
+                    final_device_names = [d.name for d in final_devices] if final_devices else []
+                    logger.error(f"Device {target_name} did not appear in Spotify devices after {extended_deadline}s")
+                    logger.error(f"Final device list: {final_device_names}")
+                    logger.error(f"Matching names tried: {target.get_all_matching_names()}")
+                    if auth_ok:
+                        logger.error(f"Note: addUser succeeded but device still didn't appear - device may need manual authentication first")
+                        logger.error(f"Try: Open Spotify app, select '{target_name}', play a song to authenticate")
+                except Exception as e:
+                    logger.error(f"Failed to get final device list for diagnostics: {e}")
+                
                 return self._failover(metrics, target_name, "not_in_devices_by_deadline")
             
             cloud_poll_duration = int((time.time() - cloud_poll_start) * 1000)
@@ -543,13 +738,13 @@ class AlarmPlaybackEngine:
             
             while time.time() < confirmation_deadline:
                 try:
-                    if verify_device_ready(self.api, cloud_device.id, timeout_s=0.5):
+                    if verify_device_ready(self.api, cloud_device.id, timeout_s=self.cfg.timings.verify_device_ready_timeout_s):
                         logger.info(f"Playback confirmed for {target_name}")
                         break
-                    time.sleep(0.2)
+                    time.sleep(self.cfg.timings.confirmation_sleep_s)
                 except Exception as e:
                     logger.warning(f"Confirmation check failed: {e}")
-                    time.sleep(0.2)
+                    time.sleep(self.cfg.timings.confirmation_sleep_s)
             else:
                 # Not confirmed by T+2s
                 logger.error(f"Playback not confirmed by T+2s for {target_name}")

@@ -81,9 +81,19 @@ class AlarmSystemConfig:
             prewarm_s=int(os.environ.get("ALARM_PREWARM_S", "60")),
             poll_fast_period_s=float(os.environ.get("ALARM_POLL_FAST_S", "5.0")),
             total_poll_deadline_s=int(os.environ.get("ALARM_POLL_DEADLINE_S", "20")),
+            poll_deadline_extension_s=int(os.environ.get("ALARM_POLL_DEADLINE_EXTENSION_S", "15")),
             debounce_after_seen_s=float(os.environ.get("ALARM_DEBOUNCE_S", "0.6")),
             retry_404_delay_s=float(os.environ.get("ALARM_RETRY_404_S", "0.7")),
-            failover_fire_after_s=float(os.environ.get("ALARM_FAILOVER_S", "2.0"))
+            failover_fire_after_s=float(os.environ.get("ALARM_FAILOVER_S", "2.0")),
+            adduser_wait_after_s=float(os.environ.get("ALARM_ADDUSER_WAIT_S", "5.0")),
+            mdns_discovery_timeout_s=float(os.environ.get("ALARM_MDNS_TIMEOUT_S", "1.5")),
+            getinfo_timeout_s=float(os.environ.get("ALARM_GETINFO_TIMEOUT_S", "1.5")),
+            adduser_timeout_s=float(os.environ.get("ALARM_ADDUSER_TIMEOUT_S", "2.5")),
+            device_info_timeout_s=float(os.environ.get("ALARM_DEVICE_INFO_TIMEOUT_S", "2.0")),
+            verify_device_ready_timeout_s=float(os.environ.get("ALARM_VERIFY_DEVICE_TIMEOUT_S", "0.5")),
+            confirmation_sleep_s=float(os.environ.get("ALARM_CONFIRMATION_SLEEP_S", "0.2")),
+            poll_sleep_fast_s=float(os.environ.get("ALARM_POLL_SLEEP_FAST_S", "0.5")),
+            poll_sleep_slow_s=float(os.environ.get("ALARM_POLL_SLEEP_SLOW_S", "1.0"))
         )
         
         # Core settings
@@ -138,7 +148,7 @@ class AlarmSystemConfig:
         """Save device profiles to file"""
         try:
             device_data = {
-                "devices": [device.dict() for device in self.targets],
+                "devices": [device.model_dump() for device in self.targets],
                 "last_updated": str(time.time())
             }
             with open(DEVICES_FILE, 'w') as f:

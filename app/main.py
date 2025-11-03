@@ -336,7 +336,7 @@ def run_alarm(alarm: Dict[str, Any]) -> None:
             try:
                 import json
                 device_data = {
-                    "devices": [device.dict() for device in alarm_config.targets],
+                    "devices": [device.model_dump() for device in alarm_config.targets],
                     "last_updated": str(time.time())
                 }
                 devices_file = str(DEVICES_FILE)
@@ -364,7 +364,7 @@ def run_alarm(alarm: Dict[str, Any]) -> None:
         try:
             import json
             device_data = {
-                "devices": [device.dict() for device in alarm_config.targets],
+                "devices": [device.model_dump() for device in alarm_config.targets],
                 "last_updated": str(time.time())
             }
             devices_file = str(DEVICES_FILE)
@@ -740,7 +740,7 @@ def background_cache_refresh():
                                     # Update the device profile with the fresh name
                                     device.name = fresh_name
                                     device_data = {
-                                        "devices": [device.dict() for device in alarm_config.targets],
+                                        "devices": [device.model_dump() for device in alarm_config.targets],
                                         "last_updated": str(time.time())
                                     }
                                     with open(DEVICES_FILE, 'w') as f:

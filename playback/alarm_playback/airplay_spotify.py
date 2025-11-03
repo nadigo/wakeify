@@ -166,6 +166,10 @@ class AirPlaySpotify:
             
             if not username or not password:
                 logger.error("SPOTIFY_USERNAME and SPOTIFY_PASSWORD must be set in environment")
+                logger.error("To use AirPlay fallback, set these environment variables:")
+                logger.error("  export SPOTIFY_USERNAME='your_spotify_username'")
+                logger.error("  export SPOTIFY_PASSWORD='your_spotify_password'")
+                logger.error("Note: AirPlay fallback is optional - Spotify Connect is preferred")
                 return False
             
             # Create the pipe file if it doesn't exist

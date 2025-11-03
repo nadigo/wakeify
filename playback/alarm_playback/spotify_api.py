@@ -180,8 +180,27 @@ class SpotifyApiWrapper:
         """
         try:
             client = self._get_client()
+            
+            # First, verify token is valid by checking current user
+            try:
+                user_info = client.current_user()
+                user_id = user_info.get('id', 'unknown')
+                user_display_name = user_info.get('display_name', 'unknown')
+                logger.debug(f"Token validated: user_id={user_id}, display_name={user_display_name}")
+            except Exception as e:
+                logger.warning(f"Failed to verify token validity with current_user(): {e}")
+                # Continue anyway - might still work for devices
+            
             devices_response = client.devices()
             devices = devices_response.get('devices', [])
+            
+            # Log device information (only warn once per session for empty lists)
+            if not devices:
+                # Only log warning at debug level to reduce noise - the orchestrator will log it once
+                logger.debug("Spotify API returned empty device list")
+            else:
+                device_names = [d.get('name', 'unknown') for d in devices]
+                logger.debug(f"Spotify API returned {len(devices)} devices: {device_names}")
             
             cloud_devices = []
             for device_dict in devices:

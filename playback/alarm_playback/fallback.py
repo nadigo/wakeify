@@ -372,8 +372,22 @@ def airplay_fallback(cfg: FallbackConfig, target_ips: List[str] = None, spotify_
         logger.info(f"Step 4: {target_device_name} still not found, attempting mDNS auth user registration")
         _mdns_auth_user_registration(target_ip, target_device_name)
         
-        # Wait for auth registration to take effect
-        target_device = _wait_for_speaker_in_spotify_devices(spotify, target_device_name, max_attempts=3, delay_s=2, device_profile=device_profile)
+        # Refresh token after authentication to ensure we have a fresh token
+        try:
+            if hasattr(spotify, 'token_manager'):
+                spotify.token_manager.refresh_token_if_needed()
+                if hasattr(spotify, '_spotify'):
+                    spotify._spotify = None  # Force recreation
+                logger.debug("Refreshed token after mDNS auth registration")
+        except Exception as e:
+            logger.debug(f"Token refresh after mDNS auth failed (non-fatal): {e}")
+        
+        # Wait longer for auth registration to take effect (some devices need more time)
+        logger.info(f"Waiting 5 seconds for {target_device_name} to register after mDNS auth...")
+        time.sleep(5.0)
+        
+        # Wait for auth registration to take effect with more attempts
+        target_device = _wait_for_speaker_in_spotify_devices(spotify, target_device_name, max_attempts=5, delay_s=2, device_profile=device_profile)
         
         if target_device:
             logger.info(f"Step 4 SUCCESS: {target_device_name} connected after mDNS auth registration")
