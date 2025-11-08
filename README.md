@@ -89,7 +89,7 @@ LOG_LEVEL=INFO        # DEBUG for more detailed logs
 #### 5. Set Up Network
 
 Wakeify needs ARP level networking to discover devices on your local network.
-For a docker setup in private LAN setup (192.168.1.x) macvlan is a good option (see below) 
+Your docker setup needs to support L@ networing, in a private LAN setup (192.168.1.x) macvlan is required (see below) 
 
 ```bash
 # Create macvlan network (uses values from .env file)
@@ -147,9 +147,6 @@ docker-compose logs -f
 
 Wakeify automatically discovers all Spotify Connect devices on your network. Devices are cached for fast loading.
 
-- First load: 2-3 seconds (full discovery)
-- Subsequent loads: Instant (cached)
-
 To manually refresh devices:
 - For detailed device status, use the 'System Status' module by clicking on the icon in the header
 - Or use `/api/devices/refresh` endpoint
@@ -189,8 +186,6 @@ If primary playback fails, Wakeify tries multiple fallback methods:
 3. mDNS queries and authentication
 4. Force connection via Spotify API
 5. Error logging with helpful instructions
-
-**Wakeify never switches devices** - it will only try to wake your selected device.
 
 ## Configuration
 
@@ -328,7 +323,6 @@ pytest tests/
 - SSL certificates in `ssl/` excluded from git
 - Self-signed certificates auto-generated on first run
 
-See [DOCUMENTATION.md](DOCUMENTATION.md#security) for detailed security information.
 
 ## Technology Stack
 
