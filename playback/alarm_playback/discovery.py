@@ -5,6 +5,7 @@ mDNS/DNS-SD discovery for Spotify Connect devices
 import socket
 import time
 import logging
+from threading import Event
 from typing import List, Optional
 from zeroconf import ServiceBrowser, ServiceListener, Zeroconf, ServiceInfo
 from zeroconf._services.info import ServiceInfo as ServiceInfoType
@@ -21,6 +22,7 @@ class SpotifyConnectListener(ServiceListener):
         self.discovered_services: List[DiscoveryResult] = []
         self.instance_hint = instance_hint
         self._completed = False
+        self._has_new_service = Event()
     
     def add_service(self, zeroconf: Zeroconf, type_: str, name: str) -> None:
         """Called when a Spotify Connect service is discovered"""
@@ -64,6 +66,7 @@ class SpotifyConnectListener(ServiceListener):
         )
         
         self.discovered_services.append(result)
+        self._has_new_service.set()
         logger.debug(f"Added service: {instance_name} at {ip}:{port} (cpath: {cpath})")
     
     def remove_service(self, zeroconf: Zeroconf, type_: str, name: str) -> None:
@@ -73,6 +76,10 @@ class SpotifyConnectListener(ServiceListener):
     def update_service(self, zeroconf: Zeroconf, type_: str, name: str) -> None:
         """Called when a service is updated"""
         logger.debug(f"Service updated: {name}")
+
+    def wait_for_first(self, timeout_s: float) -> bool:
+        """Block until at least one service is discovered or timeout expires."""
+        return self._has_new_service.wait(timeout_s)
 
 
 def mdns_discover_connect(instance_hint: Optional[str] = None, timeout_s: float = 1.5) -> DiscoveryResult:
@@ -97,11 +104,7 @@ def mdns_discover_connect(instance_hint: Optional[str] = None, timeout_s: float 
         browser = ServiceBrowser(zeroconf, "_spotify-connect._tcp.local.", listener)
         
         # Wait for discovery
-        start_time = time.time()
-        while time.time() - start_time < timeout_s:
-            time.sleep(0.1)
-            if listener.discovered_services:
-                break
+        listener.wait_for_first(timeout_s)
         
         # Stop browsing (suppress cleanup errors)
         try:

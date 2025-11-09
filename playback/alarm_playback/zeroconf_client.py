@@ -3,11 +3,48 @@ HTTP client for Spotify Connect Zeroconf endpoints
 """
 
 import logging
-import requests
+import threading
 from typing import Dict, Any, Optional
+
+import requests
+from requests.adapters import HTTPAdapter
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
+from urllib3.util.retry import Retry
 
 logger = logging.getLogger(__name__)
+
+_SESSION: Optional[requests.Session] = None
+_SESSION_LOCK = threading.Lock()
+
+
+def _http_session() -> requests.Session:
+    global _SESSION
+    if _SESSION is None:
+        with _SESSION_LOCK:
+            if _SESSION is None:
+                session = requests.Session()
+                retry_cfg = Retry(
+                    total=2,
+                    backoff_factor=0.2,
+                    status_forcelist=(429, 500, 502, 503, 504),
+                    allowed_methods=("GET", "POST"),
+                    raise_on_status=False,
+                )
+                adapter = HTTPAdapter(pool_connections=8, pool_maxsize=16, max_retries=retry_cfg)
+                session.mount("http://", adapter)
+                session.mount("https://", adapter)
+                session.headers.update({"User-Agent": "Wakeify-Zeroconf/1.0"})
+                _SESSION = session
+    return _SESSION
+
+
+def _normalize_cpath(cpath: Optional[str]) -> str:
+    normalized = (cpath or "/spotifyconnect/zeroconf").strip()
+    if not normalized:
+        normalized = "/spotifyconnect/zeroconf"
+    if not normalized.startswith("/"):
+        normalized = "/" + normalized
+    return normalized.rstrip("/")
 
 
 @retry(
@@ -28,13 +65,15 @@ def get_info(ip: str, port: int, cpath: str, timeout_s: float = 1.5) -> bool:
     Returns:
         True if device responds successfully, False otherwise
     """
-    url = f"http://{ip}:{port}{cpath}/"
+    session = _http_session()
+    cpath_normalized = _normalize_cpath(cpath)
+    url = f"http://{ip}:{port}{cpath_normalized}/"
     params = {"action": "getInfo"}
     
     logger.debug(f"GET {url} with params {params}")
     
     try:
-        response = requests.get(url, params=params, timeout=timeout_s)
+        response = session.get(url, params=params, timeout=timeout_s)
         logger.debug(f"getInfo response: {response.status_code}")
         
         if response.status_code == 200:
@@ -75,7 +114,9 @@ def add_user(ip: str, port: int, cpath: str, mode: str, creds: Dict[str, Any], t
     Returns:
         True if authentication succeeds, False otherwise
     """
-    url = f"http://{ip}:{port}{cpath}/"
+    session = _http_session()
+    cpath_normalized = _normalize_cpath(cpath)
+    url = f"http://{ip}:{port}{cpath_normalized}/"
     params = {"action": "addUser"}
     
     # Prepare payload based on mode
@@ -99,7 +140,7 @@ def add_user(ip: str, port: int, cpath: str, mode: str, creds: Dict[str, Any], t
     
     try:
         # Try JSON first (modern devices)
-        response = requests.post(url, params=params, json=payload, timeout=timeout_s)
+        response = session.post(url, params=params, json=payload, timeout=timeout_s)
         logger.debug(f"addUser JSON response: {response.status_code}")
         
         if response.status_code == 200:
@@ -110,7 +151,7 @@ def add_user(ip: str, port: int, cpath: str, mode: str, creds: Dict[str, Any], t
         if response.status_code == 415:
             logger.debug(f"Device returned 415 for JSON, trying form-encoded data")
             try:
-                response = requests.post(url, params=params, data=payload, timeout=timeout_s)
+                response = session.post(url, params=params, data=payload, timeout=timeout_s)
                 logger.debug(f"addUser form-encoded response: {response.status_code}")
                 
                 if response.status_code == 200:
@@ -156,13 +197,15 @@ def check_device_health(ip: str, port: int, cpath: str, timeout_s: float = 1.0) 
     
     import time
     start_time = time.time()
+    session = _http_session()
+    cpath_normalized = _normalize_cpath(cpath)
     
     try:
         # Try to reach the device
-        url = f"http://{ip}:{port}{cpath}/"
+        url = f"http://{ip}:{port}{cpath_normalized}/"
         params = {"action": "getInfo"}
         
-        response = requests.get(url, params=params, timeout=timeout_s)
+        response = session.get(url, params=params, timeout=timeout_s)
         response_time = (time.time() - start_time) * 1000
         
         health_info["reachable"] = True
@@ -201,13 +244,15 @@ def get_device_info(ip: str, port: int, cpath: str, timeout_s: float = 2.0) -> O
     Returns:
         Device info dictionary if successful, None otherwise
     """
-    url = f"http://{ip}:{port}{cpath}/"
+    session = _http_session()
+    cpath_normalized = _normalize_cpath(cpath)
+    url = f"http://{ip}:{port}{cpath_normalized}/"
     params = {"action": "getInfo"}
     
     logger.debug(f"Getting device info from {url}")
     
     try:
-        response = requests.get(url, params=params, timeout=timeout_s)
+        response = session.get(url, params=params, timeout=timeout_s)
         
         if response.status_code == 200:
             device_info = response.json()

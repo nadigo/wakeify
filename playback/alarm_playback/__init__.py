@@ -2,7 +2,6 @@
 Alarm Playback Module
 
 Robustly wake Spotify Connect speakers and start playback at alarm time.
-Includes automatic failover to AirPlay if the primary device fails.
 """
 
 __version__ = "2.0.0"

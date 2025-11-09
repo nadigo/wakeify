@@ -12,11 +12,10 @@ from .discovery import mdns_discover_connect
 from .zeroconf_client import get_info, add_user
 from .spotify_api import SpotifyApiWrapper, TokenManager
 from .playback import stage_device, start_play, verify_device_ready
-from .fallback import play_on_spotifyd, airplay_fallback, validate_airplay_setup
 # Adapters module removed - not needed for current implementation
 from .logging_utils import (
     get_logger, log_phase_start, log_phase_end, log_device_state_change,
-    log_fallback_event, log_error, log_metrics
+    log_error, log_metrics
 )
 
 logger = get_logger(__name__)
@@ -128,45 +127,20 @@ class AlarmPlaybackEngine:
         return None
     
     def _failover(self, metrics: PhaseMetrics, target_name: str, reason: str) -> PhaseMetrics:
-        """Execute failover: Comprehensive fallback sequence without AirPlay"""
-        log_fallback_event(logger, target_name, "primary", reason)
-        
-        # Comprehensive fallback: Use discovered device IP
-        try:
-            log_phase_start(logger, "fallback", target_name)
-            start_time = time.time()
-            
-            # Get the discovered device IP from the target profile
-            try:
-                target_profile = self._get_target_profile(target_name)
-            except ValueError:
-                # Device not in registry, cannot do fallback
-                raise ValueError(f"Device {target_name} not in registry - cannot perform fallback")
-            
-            if not target_profile.ip:
-                raise ValueError(f"No IP address available for device {target_name} - cannot perform fallback")
-            
-            target_ips = [target_profile.ip]
-            logger.info(f"Attempting comprehensive fallback to discovered device IP: {target_ips}")
-            airplay_fallback(self.cfg.fallback, target_ips=target_ips, spotify_api=self.api, target_device_name=target_name, playlist_uri=self.cfg.context_uri, device_profile=target_profile)
-            
-            duration_ms = int((time.time() - start_time) * 1000)
-            log_phase_end(logger, "fallback", target_name, duration_ms, True)
-            
-            metrics.branch = "fallback"
-            metrics.add_error(f"Primary failed: {reason}", "fallback")
-            logger.info(f"Fallback succeeded for {target_name}")
-            return metrics
-            
-        except Exception as e:
-            log_error(logger, target_name, e, {"fallback_type": "comprehensive"})
-            logger.error(f"Fallback failed for {target_name}: {e}")
-        
-        # If fallback failed, record error and stop
+        """Record failure when the primary Spotify Connect flow cannot recover."""
         metrics.branch = f"failed:{reason}"
-        metrics.add_error(f"Fallback failed: {reason}", "fallback")
-        logger.error(f"Alarm failed for {target_name}: Primary failed ({reason}), fallback failed")
-        raise RuntimeError(f"Alarm playback failed and no fallback succeeded: {reason}")
+        metrics.add_error(
+            "Fallback pipeline has been removed; the primary Spotify Connect flow must succeed.",
+            "fallback_disabled",
+        )
+        logger.error(
+            "Alarm failed for %s: primary branch failed (%s) and no secondary path is available.",
+            target_name,
+            reason,
+        )
+        raise RuntimeError(
+            f"Alarm playback failed (reason={reason}) and no fallback is available."
+        )
     
     def play_alarm(self, target_name: str) -> PhaseMetrics:
         """
@@ -194,7 +168,7 @@ class AlarmPlaybackEngine:
             webapi_start = time.time()
             
             try:
-                devices = self.api.get_devices()
+                devices = self.api.get_devices(force_refresh=True)
                 cloud_device = self._pick_device(devices, target_name)
                 
                 if cloud_device:
@@ -312,7 +286,7 @@ class AlarmPlaybackEngine:
                     if wake_success:
                         logger.info(f"Generic IP wake-up succeeded for {target_name}, checking if device appears in Spotify")
                         # Quick check if device now appears
-                        devices = self.api.get_devices()
+                        devices = self.api.get_devices(force_refresh=True)
                         cloud_device = self._pick_device(devices, target_name)
                         if cloud_device:
                             logger.info(f"Device {target_name} appeared in Spotify after IP wake-up, skipping to staging")
@@ -529,7 +503,7 @@ class AlarmPlaybackEngine:
                 
                 # Quick check if device appeared immediately after wait
                 try:
-                    devices = self.api.get_devices()
+                    devices = self.api.get_devices(force_refresh=True)
                     cloud_device = self._pick_device(devices, target.name)
                     if cloud_device:
                         logger.info(f"Device {target_name} appeared immediately after addUser wait period")
@@ -620,7 +594,7 @@ class AlarmPlaybackEngine:
                         except Exception as e:
                             logger.debug(f"Token refresh during polling failed (non-fatal): {e}")
                     
-                    devices = self.api.get_devices()
+                    devices = self.api.get_devices(force_refresh=True)
                     attempt_count += 1
                     
                     # Log available devices on first attempt and periodically for debugging
@@ -694,7 +668,7 @@ class AlarmPlaybackEngine:
             if not cloud_device:
                 # Log final diagnostic information
                 try:
-                    final_devices = self.api.get_devices()
+                    final_devices = self.api.get_devices(force_refresh=True)
                     final_device_names = [d.name for d in final_devices] if final_devices else []
                     logger.error(f"Device {target_name} did not appear in Spotify devices after {extended_deadline}s")
                     logger.error(f"Final device list: {final_device_names}")

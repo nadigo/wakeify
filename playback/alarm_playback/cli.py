@@ -8,7 +8,7 @@ import sys
 import os
 from typing import Optional
 
-from .config import AlarmPlaybackConfig, DeviceProfile, AirPlayConfig, FallbackConfig
+from .config import AlarmPlaybackConfig, DeviceProfile
 from .discovery import mdns_discover_connect, discover_all_connect_devices
 from .zeroconf_client import get_info, add_user, check_device_health
 from .spotify_api import SpotifyApiWrapper, TokenManager
@@ -175,7 +175,7 @@ def list_devices(ctx):
         token_manager = TokenManager(config.spotify)
         api = SpotifyApiWrapper(token_manager)
         
-        devices = api.get_devices()
+        devices = api.get_devices(force_refresh=True)
         
         if devices:
             click.echo(f"Found {len(devices)} Spotify devices:")
@@ -210,7 +210,7 @@ def play(ctx, device_name, context, volume):
         api = SpotifyApiWrapper(token_manager)
         
         # Get devices
-        devices = api.get_devices()
+        devices = api.get_devices(force_refresh=True)
         target_device = None
         
         for device in devices:
@@ -346,11 +346,7 @@ def status(ctx):
     for device in config.targets:
         click.echo(f"    - {device.name} (volume: {device.volume_preset}%)")
     
-    click.echo(f"  Fallback spotifyd: {config.fallback.spotifyd_device_name}")
-    click.echo(f"  AirPlay targets: {len(config.fallback.airplay.raop_target_ips)}")
-    
-    for ip in config.fallback.airplay.raop_target_ips:
-        click.echo(f"    - {ip}")
+    click.echo("  Fallback: disabled (AirPlay pipeline removed)")
 
 
 if __name__ == '__main__':

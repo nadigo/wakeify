@@ -5,5 +5,5 @@ tenacity==8.2.3
 pydantic==2.10.3
 python-dotenv==1.0.1
 click==8.1.7
-spotifywebapipython==1.1.0
+spotifywebapipython==1.0.254
 

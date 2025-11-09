@@ -75,10 +75,6 @@ services:
       # Monitoring Configuration
       - METRICS_ENABLED=${METRICS_ENABLED:-true}
       - HEALTH_CHECK_INTERVAL_S=${HEALTH_CHECK_INTERVAL_S:-30}
-      
-      # Spotify Credentials for spotifyd (for AirPlay streaming - optional)
-      - SPOTIFY_USERNAME=${SPOTIFY_USERNAME}
-      - SPOTIFY_PASSWORD=${SPOTIFY_PASSWORD}
     
     cap_add:
       - NET_ADMIN
@@ -114,7 +110,7 @@ services:
     
     # Install system dependencies and start Wakeify
     # This command sets up SSL certificates, installs dependencies, and starts the app
-    command: ["/bin/bash", "-c", "apt-get update && apt-get install -y --no-install-recommends curl wget iputils-ping net-tools avahi-utils sox ffmpeg shairport-sync tzdata libnss3-tools && rm -rf /var/lib/apt/lists/* && ln -sf /usr/share/zoneinfo/${TZ:-America/New_York} /etc/localtime && echo '${TZ:-America/New_York}' > /etc/timezone && (curl -L https://github.com/FiloSottile/mkcert/releases/latest/download/mkcert-v1.4.4-linux-amd64 -o mkcert && chmod +x mkcert && mv mkcert /usr/local/bin/ || true) && mkcert -install && mkdir -p ${BASE_DIR:-/data/wakeify}/ssl && cd ${BASE_DIR:-/data/wakeify}/ssl && (mkcert srv.local ${CONTAINER_IP:-192.168.1.11} 2>/dev/null || echo 'Certificate already exists') && (if [ ! -f srv.local.pem ]; then mv srv.local+1.pem srv.local.pem; mv srv.local+1-key.pem srv.local-key.pem 2>/dev/null || true; fi) && cp -f srv.local.pem ${CONTAINER_IP:-192.168.1.11}.pem 2>/dev/null || true && cp -f srv.local-key.pem ${CONTAINER_IP:-192.168.1.11}-key.pem 2>/dev/null || true && (curl -L https://github.com/Spotifyd/spotifyd/releases/download/v0.4.1/spotifyd-linux-x86_64-default.tar.gz -o /tmp/spotifyd.tar.gz 2>/dev/null && tar -xzf /tmp/spotifyd.tar.gz -C /usr/local/bin/ spotifyd && chmod +x /usr/local/bin/spotifyd && rm /tmp/spotifyd.tar.gz || echo 'spotifyd install failed or already exists') && pip install --no-cache-dir -r ${BASE_DIR:-/data/wakeify}/app/requirements.txt && pip install --no-cache-dir -e ${BASE_DIR:-/data/wakeify}/playback && mkdir -p ${BASE_DIR:-/data/wakeify}/data ${BASE_DIR:-/data/wakeify}/logs && cd ${BASE_DIR:-/data/wakeify}/app && python main.py"]
+    command: ["/bin/bash", "-c", "apt-get update && apt-get install -y --no-install-recommends curl wget iputils-ping net-tools avahi-utils tzdata libnss3-tools && rm -rf /var/lib/apt/lists/* && ln -sf /usr/share/zoneinfo/${TZ:-America/New_York} /etc/localtime && echo '${TZ:-America/New_York}' > /etc/timezone && (curl -L https://github.com/FiloSottile/mkcert/releases/latest/download/mkcert-v1.4.4-linux-amd64 -o mkcert && chmod +x mkcert && mv mkcert /usr/local/bin/ || true) && mkcert -install && mkdir -p ${BASE_DIR:-/data/wakeify}/ssl && cd ${BASE_DIR:-/data/wakeify}/ssl && (mkcert srv.local ${CONTAINER_IP:-192.168.1.11} 2>/dev/null || echo 'Certificate already exists') && (if [ ! -f srv.local.pem ]; then mv srv.local+1.pem srv.local.pem; mv srv.local+1-key.pem srv.local-key.pem 2>/dev/null || true; fi) && cp -f srv.local.pem ${CONTAINER_IP:-192.168.1.11}.pem 2>/dev/null || true && cp -f srv.local-key.pem ${CONTAINER_IP:-192.168.1.11}-key.pem 2>/dev/null || true && python3 -m pip install --no-cache-dir -r ${BASE_DIR:-/data/wakeify}/app/requirements.txt && python3 -m pip install --no-cache-dir ${BASE_DIR:-/data/wakeify}/playback && mkdir -p ${BASE_DIR:-/data/wakeify}/data ${BASE_DIR:-/data/wakeify}/logs && cd ${BASE_DIR:-/data/wakeify}/app && python3 main.py"]
     
     healthcheck:
       test: ["CMD", "curl", "-k", "-f", "https://localhost:443/health"]

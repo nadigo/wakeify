@@ -69,7 +69,7 @@ class PhaseMetrics:
     adduser_ms: Optional[int] = None
     cloud_visible_ms: Optional[int] = None
     play_ms: Optional[int] = None
-    branch: Optional[str] = None  # "primary" | "fallback_spotifyd" | "fallback_airplay"
+    branch: Optional[str] = None  # e.g. "primary", "failed:not_in_devices"
     errors: Optional[list] = None
     total_duration_ms: Optional[int] = None
     

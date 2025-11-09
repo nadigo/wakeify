@@ -305,12 +305,32 @@ python main.py
 ### Running Tests
 
 ```bash
-# Install test dependencies
-pip install pytest pytest-asyncio
+# 1. Create a local virtual environment (install python3-venv if missing)
+python3 -m venv .venv
+source .venv/bin/activate
 
-# Run tests
-pytest tests/
+# 2. Install dev dependencies (includes pytest)
+pip install -r playback/requirements-dev.txt
+
+# 3. Execute the focused suites
+pytest playback/tests
+# Optional: pytest tests
 ```
+
+> Debian-based hosts may need `sudo apt install python3-venv` before creating the virtual environment.
+
+## Release Checklist
+
+- [ ] Update `DOCUMENTATION.md`, `README.md`, and version strings to reflect the new release.
+- [ ] Regenerate virtualenv and install dependencies: `python3 -m venv .venv && source .venv/bin/activate && pip install -r playback/requirements-dev.txt && pip install -r app/requirements.txt`.
+- [ ] Run automated tests: `pytest playback/tests`.
+- [ ] Build and start the container: `docker-compose up --build wakeify`.
+- [ ] Perform smoke tests:
+  - Hit `https://<container-ip>/health` and expect `{"status": "healthy"}`.
+  - Log into the web UI, trigger `Play Now`, and confirm playback.
+  - Verify `/api/devices` returns online devices.
+- [ ] Confirm `.env`, `data/`, and `ssl/` remain excluded from source control (`git status` clean).
+- [ ] Archive release notes with known issues and attach relevant metrics if available.
 
 ## Security
 
@@ -374,7 +394,7 @@ Contributions welcome! Please:
 
 ## Version
 
-**Current Version:** 2.0.0  
+**Current Version:** 2.1.0  
 **Status:** Production Ready
 
 Wake up and smell the coffee ☕

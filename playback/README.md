@@ -1,16 +1,16 @@
 # Alarm Playback Module
 
-A robust Python system for waking Spotify Connect speakers (especially Devialet Phantom) and starting playback at alarm time, with automatic failover to AirPlay if the primary device fails.
+A robust Python system for waking Spotify Connect speakers (especially Devialet Phantom) and starting playback at alarm time.
 
 ## Features
 
-- **mDNS Discovery**: Automatically discover Spotify Connect devices on your network
-- **Zeroconf Protocol**: Wake sleeping devices using getInfo and addUser endpoints
+- **Resilient Discovery**: Performs mDNS discovery, Zeroconf getInfo, and addUser flows to wake Spotify Connect speakers
 - **Spotify Web API Integration**: Control playback, volume, and device selection
-- **Automatic Failover**: Falls back to spotifyd or AirPlay if primary device fails
 - **Circuit Breaker**: Prevents repeated failures on problematic devices
 - **Structured Logging**: JSON logging with detailed metrics and timing
 - **CLI Testing Tools**: Comprehensive command-line interface for testing
+- **Precise Spotify Connect Control**: Handles discovery, authentication, and playback timeline for Spotify devices
+- **Guided Recovery**: Logs clear manual steps when Spotify refuses to expose the device
 
 ## Quick Start
 
@@ -47,9 +47,6 @@ SPOTIFY_REFRESH_TOKEN=your_refresh_token_here
 
 # Default playlist for alarms
 ALARM_CONTEXT_URI=spotify:playlist:your_default_playlist_id
-
-# AirPlay fallback targets
-AIRPLAY_TARGET_IPS=192.168.1.100,192.168.1.101
 
 # Logging
 LOG_LEVEL=INFO
@@ -159,142 +156,33 @@ Timings(
 2. **T-30s Activate**: getInfo check to wake device
 3. **T-10s Poll**: Fast polling for device to appear in Spotify API
 4. **T-0 Fire**: Transfer playback, set volume, start playing
-5. **T+2s Failover**: If primary fails, activate fallback mechanisms
-
-### Fallback Mechanisms
-
-1. **Spotifyd Fallback**: Use always-online spotifyd device
-2. **AirPlay Fallback**: Stream to AirPlay targets via raop_play
-3. **Circuit Breaker**: Skip primary path for repeatedly failing devices
+5. **T+2s Confirm**: Verify playback is active; if Spotify still hides the device, log manual recovery instructions.
 
 ### State Machine
 
 ```
 UNKNOWN → DISCOVERED → LOCAL_AWAKE → LOGGED_IN → CLOUD_VISIBLE → STAGED → PLAYING
-                ↓
-        DEEP_SLEEP_SUSPECTED → FALLBACK_ACTIVE
+             ↓
+     DEEP_SLEEP_SUSPECTED
 ```
 
 ## Dependencies
 
 ### Required External Services
 
-- **librespot/spotifyd**: Always-online Spotify Connect device for fallback
-- **raop_play**: AirPlay client for audio streaming
-- **sox**: Audio processing for test tones (optional)
+None. Wakeify interacts only with Spotify Web API and Zeroconf-enabled speakers.
 
 ### System Dependencies
 
 ```bash
 # Ubuntu/Debian
-sudo apt-get install sox
+sudo apt-get install avahi-utils
 
 # macOS
-brew install sox
-
-# Install raop_play (varies by distribution)
-# See: https://github.com/philippe44/raop_play
+brew install avahi
 ```
 
 ## CLI Commands
 
 ### Device Discovery
-- `alarm-cli discover <name>`: Discover specific device
-- `alarm-cli discover-all`: Discover all devices
-- `alarm-cli touch <name>`: Test device wake-up
-- `alarm-cli health <name>`: Check device health
-
-### Authentication
-- `alarm-cli adduser <name> --mode [blob|token]`: Test authentication
-
-### Playback Testing
-- `alarm-cli list-devices`: Show Spotify devices
-- `alarm-cli play <name> --context <uri>`: Test immediate playback
-- `alarm-cli alarm <name>`: Run full alarm simulation
-
-### System
-- `alarm-cli status`: Show configuration and system status
-
-## Logging
-
-The system uses structured JSON logging with detailed metrics:
-
-```json
-{
-  "timestamp": "2024-01-01T12:00:00Z",
-  "level": "INFO",
-  "message": "Completed phase: play (success: true)",
-  "device_name": "Phantom",
-  "phase": "play",
-  "duration_ms": 1234,
-  "success": true
-}
-```
-
-## Troubleshooting
-
-### Common Issues
-
-1. **Device not discovered**: Check mDNS/Bonjour is working, device is on same network
-2. **Authentication fails**: Verify Spotify app credentials and device pairing
-3. **Playback fails**: Check device appears in Spotify Web API devices
-4. **Fallback fails**: Ensure spotifyd is running and raop_play is installed
-
-### Debug Mode
-
-Run with debug logging for detailed information:
-
-```bash
-alarm-cli --log-level DEBUG alarm "Phantom"
-```
-
-### Device-Specific Notes
-
-#### Devialet Phantom
-- Requires app pairing for addUser authentication
-- May need specific timing adjustments for wake-up
-- AirPlay fallback works well as backup
-
-#### Other Spotify Connect Devices
-- Some devices may not support addUser (skip authentication)
-- Volume control may vary by device type
-- Check device capabilities in configuration
-
-## Development
-
-### Running Tests
-
-```bash
-# Install test dependencies
-pip install pytest
-
-# Run tests
-pytest tests/
-```
-
-### Adding New Device Types
-
-1. Create device profile in configuration
-2. Adjust timing parameters if needed
-3. Test with CLI commands
-4. Add to device registry
-
-### Contributing
-
-1. Fork the repository
-2. Create feature branch
-3. Add tests for new functionality
-4. Submit pull request
-
-## License
-
-MIT License - see LICENSE file for details.
-
-## Support
-
-For issues and questions:
-1. Check the troubleshooting section
-2. Review logs with debug mode
-3. Test individual components with CLI
-4. Open an issue with detailed logs
-
+- `

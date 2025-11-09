@@ -148,28 +148,6 @@ class TestAlarmSystemIntegration(unittest.TestCase):
         self.assertEqual(len(devices), 1)
         self.assertEqual(devices[0].name, "Test Device")
         self.assertTrue(devices[0].is_active)
-    
-    def test_fallback_configuration(self):
-        """Test fallback configuration"""
-        from alarm_config import load_fallback_config, save_fallback_config
-        from alarm_playback.config import FallbackConfig, AirPlayConfig
-        
-        # Create test config
-        airplay_config = AirPlayConfig(raop_target_ips=["192.168.1.100", "192.168.1.101"])
-        fallback_config = FallbackConfig(
-            spotifyd_device_name="Test Fallback",
-            airplay=airplay_config
-        )
-        
-        # Save config
-        save_fallback_config(fallback_config)
-        
-        # Load config
-        loaded_config = load_fallback_config()
-        
-        self.assertEqual(loaded_config.spotifyd_device_name, "Test Fallback")
-        self.assertEqual(len(loaded_config.airplay.raop_target_ips), 2)
-        self.assertIn("192.168.1.100", loaded_config.airplay.raop_target_ips)
 
 class TestPlaybackEngine(unittest.TestCase):
     """Test playback engine functionality"""

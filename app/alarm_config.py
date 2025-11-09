@@ -14,7 +14,7 @@ from dotenv import load_dotenv
 
 # Import playback module configuration
 from alarm_playback.config import (
-    SpotifyAuth, DeviceProfile, AirPlayConfig, FallbackConfig, 
+    SpotifyAuth, DeviceProfile, 
     Timings, AlarmPlaybackConfig
 )
 
@@ -27,7 +27,6 @@ logger = logging.getLogger(__name__)
 BASE_DIR = os.environ.get("BASE_DIR", "/data/wakeify")
 DATA_DIR = os.path.join(BASE_DIR, "data")
 DEVICES_FILE = os.path.join(DATA_DIR, "devices.json")
-FALLBACK_CONFIG_FILE = os.path.join(DATA_DIR, "fallback_config.json")
 CIRCUIT_BREAKERS_FILE = os.path.join(DATA_DIR, "circuit_breakers.json")
 METRICS_FILE = os.path.join(DATA_DIR, "metrics.json")
 
@@ -42,7 +41,6 @@ class AlarmSystemConfig:
     # Core alarm settings
     spotify: SpotifyAuth
     targets: List[DeviceProfile]
-    fallback: FallbackConfig
     timings: Timings
     context_uri: str
     log_level: str
@@ -69,12 +67,6 @@ class AlarmSystemConfig:
         
         # Default device profiles (will be populated by device registry)
         targets = []
-        
-        # Fallback configuration
-        fallback = FallbackConfig(
-            spotifyd_device_name=os.environ.get("SPOTIFYD_DEVICE_NAME", "Alarm Fallback"),
-            airplay=AirPlayConfig.from_env()
-        )
         
         # Timing configuration
         timings = Timings(
@@ -117,7 +109,6 @@ class AlarmSystemConfig:
         return cls(
             spotify=spotify,
             targets=targets,
-            fallback=fallback,
             timings=timings,
             context_uri=context_uri,
             log_level=log_level,
@@ -137,7 +128,6 @@ class AlarmSystemConfig:
         return AlarmPlaybackConfig(
             spotify=self.spotify,
             targets=self.targets,
-            fallback=self.fallback,
             timings=self.timings,
             context_uri=self.context_uri,
             log_level=self.log_level,
@@ -202,36 +192,6 @@ def load_alarm_config() -> AlarmSystemConfig:
         config.load_device_profiles()
     
     return config
-
-
-def save_fallback_config(config: FallbackConfig) -> None:
-    """Save fallback configuration to file"""
-    try:
-        if hasattr(config, "model_dump"):
-            payload = config.model_dump()
-        else:
-            from dataclasses import asdict as _asdict
-            payload = _asdict(config)
-        with open(FALLBACK_CONFIG_FILE, 'w') as f:
-            json.dump(payload, f, indent=2)
-        logger.info(f"Saved fallback configuration to {FALLBACK_CONFIG_FILE}")
-    except Exception as e:
-        logger.error(f"Failed to save fallback configuration: {e}")
-
-
-def load_fallback_config() -> FallbackConfig:
-    """Load fallback configuration from file"""
-    try:
-        if not os.path.exists(FALLBACK_CONFIG_FILE):
-            return FallbackConfig()
-        
-        with open(FALLBACK_CONFIG_FILE, 'r') as f:
-            data = json.load(f)
-        
-        return FallbackConfig(**data)
-    except Exception as e:
-        logger.error(f"Failed to load fallback configuration: {e}")
-        return FallbackConfig()
 
 
 def save_circuit_breakers(circuit_breakers: Dict[str, Dict[str, Any]]) -> None:

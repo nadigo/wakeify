@@ -252,30 +252,6 @@ def log_playback_event(logger: logging.Logger, device_name: str, event_type: str
     )
 
 
-def log_fallback_event(logger: logging.Logger, device_name: str, fallback_type: str,
-                      reason: str, **kwargs) -> None:
-    """
-    Log fallback events.
-    
-    Args:
-        logger: Logger instance
-        device_name: Device name
-        fallback_type: Type of fallback (spotifyd, airplay)
-        reason: Reason for fallback
-        **kwargs: Additional context
-    """
-    logger.warning(
-        f"Fallback activated: {fallback_type} (reason: {reason})",
-        extra={
-            "device_name": device_name,
-            "event_type": "fallback",
-            "fallback_type": fallback_type,
-            "fallback_reason": reason,
-            **kwargs
-        }
-    )
-
-
 def log_error(logger: logging.Logger, device_name: str, error: Exception,
               context: Optional[Dict[str, Any]] = None) -> None:
     """

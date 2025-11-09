@@ -78,32 +78,6 @@ class DeviceProfile(BaseModel):
         return unique_names
 
 
-class AirPlayConfig(BaseModel):
-    """AirPlay fallback configuration using raop_play only"""
-    raop_target_ips: List[str] = Field(default_factory=list, description="Target IPs for raop_play")
-
-    @classmethod
-    def from_env(cls) -> "AirPlayConfig":
-        """Create AirPlayConfig from environment variables"""
-        ips_str = os.getenv("AIRPLAY_TARGET_IPS", "")
-        raop_target_ips = [ip.strip() for ip in ips_str.split(",") if ip.strip()]
-        return cls(raop_target_ips=raop_target_ips)
-
-
-class FallbackConfig(BaseModel):
-    """Fallback device configuration"""
-    spotifyd_device_name: str = Field(default="Alarm Fallback", description="Name of always-online spotifyd device")
-    airplay: AirPlayConfig = Field(default_factory=AirPlayConfig.from_env, description="AirPlay configuration")
-    
-    @classmethod
-    def from_env(cls) -> "FallbackConfig":
-        """Create FallbackConfig from environment variables"""
-        return cls(
-            spotifyd_device_name=os.getenv("SPOTIFYD_DEVICE_NAME", "Nadav's Echo Spot"),
-            airplay=AirPlayConfig.from_env()
-        )
-
-
 class Timings(BaseModel):
     """Timing configuration for alarm orchestration"""
     prewarm_s: int = Field(default=60, ge=10, le=300, description="Pre-warm time in seconds")
@@ -140,7 +114,6 @@ class AlarmPlaybackConfig(BaseModel):
     """Main configuration for alarm playback system"""
     spotify: SpotifyAuth = Field(default_factory=SpotifyAuth.from_env, description="Spotify authentication")
     targets: List[DeviceProfile] = Field(default_factory=list, description="Target device profiles")
-    fallback: FallbackConfig = Field(default_factory=FallbackConfig.from_env, description="Fallback configuration")
     timings: Timings = Field(default_factory=Timings, description="Timing configuration")
     context_uri: str = Field(
         default_factory=lambda: os.getenv("ALARM_CONTEXT_URI", ""),
@@ -155,7 +128,6 @@ class AlarmPlaybackConfig(BaseModel):
         """Create configuration from environment variables"""
         return cls(
             spotify=SpotifyAuth.from_env(),
-            fallback=FallbackConfig(airplay=AirPlayConfig.from_env()),
             context_uri=os.getenv("ALARM_CONTEXT_URI", ""),
             log_level=os.getenv("LOG_LEVEL", "INFO"),
             log_format=os.getenv("LOG_FORMAT", "json")

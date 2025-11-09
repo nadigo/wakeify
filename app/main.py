@@ -549,15 +549,7 @@ def stop_alarm_playback(alarm_id: str):
     """Stop playback for a specific alarm."""
     logger.info(f"Stop time reached for alarm {alarm_id}, stopping playback")
     
-    # Stop any active AirPlay playback
-    try:
-        from alarm_playback.fallback import stop_all_airplay_playback
-        stop_all_airplay_playback()
-        logger.info("Stopped all AirPlay playback")
-    except Exception as e:
-        logger.error(f"Error stopping AirPlay playback: {e}")
-    
-    # Stop regular Spotify playback
+    # Stop regular Spotify playback only
     sp = get_spotify_client()
     if sp:
         try:

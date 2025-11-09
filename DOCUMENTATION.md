@@ -20,16 +20,16 @@
 
 ### Purpose
 
-Wakeify is a web-based alarm system that plays Spotify playlists on any Spotify Connect devices at scheduled times with comprehensive fallback mechanisms.
+Wakeify is a web-based alarm system that plays Spotify playlists on any Spotify Connect devices at scheduled times with clear recovery guidance when devices need manual attention.
 
 ### Key Features
 
 - **Timeline-Based Execution** 
 - **Automatic Device Discovery** via mDNS (Zeroconf)
 - **Spotify Connect Integration** via Web API
-- **Comprehensive Fallbacks** (mDNS auth, AirPlay)
 - **APScheduler** for precise timing
 - **Web UI** for alarm management
+- **Guided Recovery** - Clear instructions when Spotify Connect devices need manual authentication
 
 ### Technology Stack
 
@@ -107,7 +107,7 @@ User Sets Alarm → APScheduler → Alarm Time → Timeline Execution → Playba
 │                     External Services                         │
 │                                                              │
 │  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐        │
-│  │   mDNS/     │  │   Spotify   │  │  AirPlay    │        │
+│  │   mDNS/     │  │   Spotify   │  │  Devices   │        │
 │  │  Zeroconf   │  │   Web API   │  │   Devices   │        │
 │  │             │  │             │  │             │        │
 │  │ - Discovery │  │ - Auth      │  │ - Streaming │        │
@@ -139,6 +139,17 @@ User Sets Alarm → APScheduler → Alarm Time → Timeline Execution → Playba
 @app.get("/api/devices")             # Device discovery
 @app.get("/test/speakers")           # Speaker test page
 ```
+
+### Application Flow Audit (2025-11-08)
+
+- **Startup Lifespan:** `lifespan()` loads JSON data, instantiates `AlarmPlaybackConfig`, boots APScheduler (America/New_York), schedules alarms, and spawns two daemon threads (`background_device_registration`, `background_cache_refresh`). Both threads run while the global `running` flag is true.
+- **Data Persistence:** Alarms and device profiles live in `data/alarms.json` and `data/devices.json`. CRUD endpoints modify in-memory lists, then `save_data()` flushes JSON synchronously before re-scheduling. Device profile mutations in `run_alarm()` persist immediately to avoid data loss on crash.
+- **Scheduling Path:** `schedule_alarms()` maps comma-separated `dow` strings to cron expressions and creates three jobs per alarm (prewarm, run, optional stop). Misfires run immediately by design (`misfire_grace_time=None`) to avoid skipped wakeups after brief downtime.
+- **Background Duties:** Registration thread polls Spotify Web API every 60s to ensure configured targets appear; it triggers `_mdns_auth_user_registration()` when missing. Cache refresh thread (300s loop) primes device cache via Zeroconf discovery, `check_device_health()`, and Spotify Web API, reusing a friendly-name cache (TTL 900s).
+- **Blocking Calls & Risks:** Startup and background loops rely on synchronous I/O (filesystem, HTTP via Spotipy, Zeroconf, requests). Long network timeouts inside background threads can stall cache freshness but do not block the async event loop. Zeroconf discovery and Spotipy calls in `/` and `/api/devices` routes offload to executors when cache miss occurs, but repeated cache busts can still add ~2–3s latency.
+- **External Dependencies:** Spotify OAuth via `spotipy.SpotifyOAuth`, Spotify Web API (devices, playback, playlists), Zeroconf/mDNS discovery, HTTP `getInfo` on target devices, and APScheduler.
+- **Configuration Coupling:** `AlarmSystemConfig` bridges environment variables into `AlarmPlaybackConfig`. DeviceRegistry feeds friendly names and profiles using the same playback library types, so schema drift between `app` and `playback` modules must stay synchronized.
+- **Global State:** Module-level globals (`alarms`, `devices`, `spotify`, caches) simplify access but require careful synchronization. All mutations happen on the main thread or serialized operations; background threads only read or swap entire dicts, which is safe under CPython GIL but should avoid partial writes.
 
 ### 2. Alarm Playback Engine (`playback/alarm_playback/orchestrator.py`)
 
@@ -481,150 +492,6 @@ This is expected:
    - `APP_SECRET`: Secure random string for session management
    - Generate with: `openssl rand -hex 32`
 
-3. **Spotify Account Credentials** (optional, for spotifyd fallback)
-   - `SPOTIFY_USERNAME`: Your Spotify username
-   - `SPOTIFY_PASSWORD`: Your Spotify account password
-
 ### Setup Instructions
 
-1. Copy `.env.example` to `.env`
-2. Edit `.env` and fill in all required values
-3. Verify `.env` is in `.gitignore`
-4. Never commit `.env` to version control
-
-### Files Excluded from Git
-
-- `.env` - Environment variables with secrets
-- `data/token.json` - Spotify OAuth tokens
-- `data/devices.json` - Cached device information
-- `data/alarms.json` - User alarm data
-- `data/circuit_breakers.json` - Circuit breaker state
-- `ssl/` - SSL certificates and keys
-
-### Token Storage
-
-Spotify OAuth tokens stored in `data/token.json`:
-- Contains sensitive access and refresh tokens
-- Automatically excluded from version control
-- Should be backed up securely if needed
-- Can be regenerated via OAuth flow if lost
-
----
-
-## Performance Characteristics
-
-### Page Load Performance
-
-**Cache Hit:**
-- Time: ~200ms server response
-- Behavior: Uses cached device list
-- Frequency: All loads after first
-
-**Cache Miss:**
-- Time: 2-3 seconds
-- Why: Full device discovery (mDNS + health checks)
-- Frequency: First load or after cache expiry
-
-### Cache Strategy
-
-- **TTL:** 2 minutes
-- **Background Refresh:** Every 2 minutes
-- **Fresh Data:** Visit `/test/speakers` to force refresh
-
-### mDNS Discovery
-
-- **Timeout:** 1.5 seconds
-- **Devices Found:** 3-5 typical
-- **Method:** Runs in thread pool for async
-
-### Device Health Check
-
-- **Timeout:** 0.1 seconds per device
-- **Method:** HTTP GET to getInfo endpoint
-- **Total for 4 devices:** ~0.4 seconds
-
-### Alarm Playback Performance
-
-**Fast Path (webapi_direct):**
-- **Total Duration:** 1.6-1.7 seconds
-- **Discovery:** 167-264ms (mDNS discovery when device not in cache)
-- **GetInfo:** Skipped (device already available via Web API)
-- **AddUser:** Skipped (device already authenticated)
-- **Cloud Visibility:** Skipped (device already in Spotify devices)
-- **Play:** 764-771ms (playback start and confirmation)
-- **Optimizations:** Debounce removed, immediate confirmation loop
-
-**Fast Path Characteristics:**
-- Triggered when device is already available in Spotify Web API
-- No authentication delays (device already registered)
-- Minimal network overhead (single API call for playback)
-- Playback confirmation loop ensures device is actively playing
-
-**Typical Performance Breakdown:**
-- Device discovery (if needed): 167-264ms
-- Playback start: ~400ms
-- Confirmation verification: ~350ms
-- Total: 1.6-1.7 seconds from alarm trigger to confirmed playback
-
-**Note:** Performance may vary based on network latency, device responsiveness, and Spotify API response times. The fast path represents the optimal case where the device is already authenticated and available.
-
----
-
-## Known Limitations
-
-1. **HTTPS Only**
-   - Wakeify requires HTTPS for all connections
-   - Self-signed certificates must be accepted in browser
-   - No HTTP fallback available
-
-2. **Device Authentication**
-   - Some devices require manual authentication via Spotify app before inital play
-   
-3. **Parallel playback**
-   - Alarm will switch to active player due to spotify limitetion of one playback per user's deivce 
-
-4. **mDNS Reliability**
-   - Requires macvlan or host networking
-   - `NET_BROADCAST` capability required
-   - May fail in bridge network mode
-  
-5. **AirPlay Fallback**
-   - Not implamented - planned in future versions 
-
----
-
-## Changelog
-
-### v2.1.0 (Current)
-
-- **All timeouts made configurable** via environment variables for fine-tuning
-- **Fast path optimization:** Removed debounce delay when device already available via Web API
-- **Playback confirmation loop:** Ensures device is actively playing before declaring success
-- **Enhanced authentication flow:**
-  - Token refresh before and after `addUser`
-  - Extended polling deadline (+15s) after successful `addUser`
-  - Periodic token refresh during cloud polling
-  - `getInfo` call after `addUser` to extract additional device names
-- **Performance improvements:** Fast path execution time reduced to ~1.6-1.7 seconds
-- **Pydantic V2 compatibility:** Replaced deprecated `.dict()` with `.model_dump()`
-- **Improved error messages:** Better guidance for AirPlay fallback setup
-
-### v2.0.0
-
-- Added APScheduler for precise timing
-- Implemented stop-time feature
-- Added device discovery cache (2-minute TTL)
-- Removed tone playback from AirPlay fallback
-- Added background device registration
-- Fixed async/await issues in device discovery
-- Improved error messages with device names
-- Added health check for device status
-- Generic device discovery (no device-specific code)
-- **HTTPS only** - all connections require SSL/TLS encryption
-
----
-
-**Last Updated:** 2025-11-03  
-**Version:** 2.1.0  
-**Status:** Production Ready  
-**Project:** Wakeify - Wake up and smell the coffee ☕
+1. Copy `.env.example`
