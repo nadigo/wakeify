@@ -6,9 +6,8 @@ import socket
 import time
 import logging
 from threading import Event
-from typing import List, Optional
+from typing import Dict, List, Optional
 from zeroconf import ServiceBrowser, ServiceListener, Zeroconf, ServiceInfo
-from zeroconf._services.info import ServiceInfo as ServiceInfoType
 
 from .models import DiscoveryResult
 
@@ -23,6 +22,7 @@ class SpotifyConnectListener(ServiceListener):
         self.instance_hint = instance_hint
         self._completed = False
         self._has_new_service = Event()
+        self._services_by_instance: Dict[str, DiscoveryResult] = {}
     
     def add_service(self, zeroconf: Zeroconf, type_: str, name: str) -> None:
         """Called when a Spotify Connect service is discovered"""
@@ -34,7 +34,13 @@ class SpotifyConnectListener(ServiceListener):
             return
         
         # Extract service details
-        ip = socket.inet_ntoa(info.addresses[0]) if info.addresses else None
+        ip_addresses = []
+        try:
+            ip_addresses = info.parsed_addresses()
+        except AttributeError:
+            pass  # Older zeroconf versions may not expose parsed_addresses()
+        
+        ip = ip_addresses[0] if ip_addresses else (socket.inet_ntoa(info.addresses[0]) if info.addresses else None)
         port = info.port
         cpath = None
         # Extract instance name from the service name (format: instance_name._spotify-connect._tcp.local.)
@@ -55,7 +61,10 @@ class SpotifyConnectListener(ServiceListener):
         txt_records = {}
         if info.properties:
             for key, value in info.properties.items():
-                txt_records[key.decode('utf-8')] = value.decode('utf-8')
+                txt_key = key.decode('utf-8', errors='ignore')
+                if not txt_key:
+                    continue
+                txt_records[txt_key] = value.decode('utf-8', errors='ignore') if isinstance(value, bytes) else str(value)
         
         result = DiscoveryResult(
             ip=ip,
@@ -65,7 +74,18 @@ class SpotifyConnectListener(ServiceListener):
             txt_records=txt_records
         )
         
-        self.discovered_services.append(result)
+        key = instance_name.lower()
+        existing = self._services_by_instance.get(key)
+        self._services_by_instance[key] = result
+        if existing:
+            # Update in-place to keep deterministic ordering
+            for idx, existing_result in enumerate(self.discovered_services):
+                if existing_result.instance_name.lower() == key:
+                    self.discovered_services[idx] = result
+                    break
+        else:
+            self.discovered_services.append(result)
+        
         self._has_new_service.set()
         logger.debug(f"Added service: {instance_name} at {ip}:{port} (cpath: {cpath})")
     
@@ -79,7 +99,44 @@ class SpotifyConnectListener(ServiceListener):
 
     def wait_for_first(self, timeout_s: float) -> bool:
         """Block until at least one service is discovered or timeout expires."""
+        if self._has_new_service.is_set():
+            return True
+        self._has_new_service.clear()
         return self._has_new_service.wait(timeout_s)
+
+    def wait_for_accumulation(self, total_timeout_s: float, idle_grace_s: float = 0.3) -> None:
+        """
+        Wait for services to accumulate up to a total timeout, with an idle grace window
+        to collect late-arriving responses.
+        """
+        deadline = time.monotonic() + max(0.0, total_timeout_s)
+        if self._has_new_service.is_set():
+            self._has_new_service.clear()
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            if not self._has_new_service.wait(remaining):
+                break
+            self._has_new_service.clear()
+            if idle_grace_s <= 0:
+                continue
+            idle_deadline = time.monotonic() + idle_grace_s
+            while True:
+                idle_remaining = idle_deadline - time.monotonic()
+                if idle_remaining <= 0:
+                    break
+                if self._has_new_service.wait(idle_remaining):
+                    self._has_new_service.clear()
+                    idle_deadline = time.monotonic() + idle_grace_s
+                else:
+                    break
+
+    def snapshot(self) -> List[DiscoveryResult]:
+        """Return a deduplicated snapshot of discovered services."""
+        if not self._services_by_instance:
+            return []
+        return list(self._services_by_instance.values())
 
 
 def mdns_discover_connect(instance_hint: Optional[str] = None, timeout_s: float = 1.5) -> DiscoveryResult:
@@ -114,11 +171,15 @@ def mdns_discover_connect(instance_hint: Optional[str] = None, timeout_s: float 
             logger.debug(f"ServiceBrowser cleanup warning (non-fatal): {e}")
         
         # Return best match
-        if listener.discovered_services:
+        services = listener.snapshot()
+        if not services:
+            services = listener.discovered_services
+
+        if services:
             # Try exact matches first
             if instance_hint:
                 exact_matches = [
-                    s for s in listener.discovered_services 
+                    s for s in services 
                     if instance_hint.lower() == s.instance_name.lower()
                 ]
                 if exact_matches:
@@ -127,7 +188,7 @@ def mdns_discover_connect(instance_hint: Optional[str] = None, timeout_s: float 
                 else:
                     # Try partial matches (case-insensitive)
                     partial_matches = [
-                        s for s in listener.discovered_services 
+                        s for s in services 
                         if instance_hint.lower() in s.instance_name.lower() or s.instance_name.lower() in instance_hint.lower()
                     ]
                     if partial_matches:
@@ -135,11 +196,11 @@ def mdns_discover_connect(instance_hint: Optional[str] = None, timeout_s: float 
                         logger.info(f"Found partial match for hint '{instance_hint}': {result.instance_name}")
                     else:
                         # No match, use first device
-                        result = listener.discovered_services[0]
+                        result = services[0]
                         logger.info(f"No match for hint '{instance_hint}', using first available: {result.instance_name}")
             else:
                 # No hint, use first device
-                result = listener.discovered_services[0]
+                result = services[0]
             
             logger.info(f"Discovery successful: {result.instance_name} at {result.ip}:{result.port}")
             return result
@@ -178,9 +239,7 @@ def discover_all_connect_devices(timeout_s: float = 3.0) -> List[DiscoveryResult
         logger.debug("ServiceBrowser created, waiting for discovery...")
         
         # Wait for discovery
-        start_time = time.time()
-        while time.time() - start_time < timeout_s:
-            time.sleep(0.1)
+        listener.wait_for_accumulation(timeout_s)
         
         # Stop browsing (suppress cleanup errors)
         try:
@@ -189,8 +248,11 @@ def discover_all_connect_devices(timeout_s: float = 3.0) -> List[DiscoveryResult
             # Known issue with zeroconf cleanup - non-fatal
             logger.debug(f"ServiceBrowser cleanup warning (non-fatal): {e}")
         
-        logger.info(f"Discovered {len(listener.discovered_services)} Spotify Connect devices")
-        return listener.discovered_services
+        services = listener.snapshot()
+        if not services:
+            services = listener.discovered_services
+        logger.info(f"Discovered {len(services)} Spotify Connect devices")
+        return services
     
     except Exception as e:
         logger.error(f"Full discovery failed: {e}")

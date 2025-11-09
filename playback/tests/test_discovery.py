@@ -41,6 +41,8 @@ class TestDiscovery:
         # Mock empty discovery result
         mock_listener = Mock()
         mock_listener.discovered_services = []
+        mock_listener.snapshot.return_value = []
+        mock_listener.wait_for_first.return_value = False
         
         with patch('alarm_playback.discovery.SpotifyConnectListener', return_value=mock_listener):
             result = mdns_discover_connect("TestDevice", timeout_s=0.1)
