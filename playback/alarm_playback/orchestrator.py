@@ -129,17 +129,41 @@ class AlarmPlaybackEngine:
     def _failover(self, metrics: PhaseMetrics, target_name: str, reason: str) -> PhaseMetrics:
         """Record failure when the primary Spotify Connect flow cannot recover."""
         metrics.branch = f"failed:{reason}"
-        metrics.add_error(
-            "Fallback pipeline has been removed; the primary Spotify Connect flow must succeed.",
-            "fallback_disabled",
-        )
+        
+        # Provide helpful error messages based on failure reason
+        if reason == "not_in_devices_by_deadline":
+            error_msg = (
+                f"Device '{target_name}' did not appear in Spotify API within the deadline. "
+                f"This usually means the device needs manual authentication first. "
+                f"SOLUTION: Open Spotify app on your phone/computer, select '{target_name}' as the playback device, "
+                f"and play any song to authenticate it. Then retry the alarm."
+            )
+        elif reason == "no_mdns":
+            error_msg = (
+                f"Device '{target_name}' could not be discovered on the network. "
+                f"Check that the device is powered on and connected to the same network."
+            )
+        elif reason == "circuit_breaker_open":
+            error_msg = (
+                f"Device '{target_name}' has failed multiple times. "
+                f"Circuit breaker is open. The device may need manual authentication or troubleshooting."
+            )
+        else:
+            error_msg = (
+                f"Alarm playback failed for '{target_name}' (reason: {reason}). "
+                f"Fallback pipeline has been removed; the primary Spotify Connect flow must succeed."
+            )
+        
+        metrics.add_error(error_msg, reason)
         logger.error(
             "Alarm failed for %s: primary branch failed (%s) and no secondary path is available.",
             target_name,
             reason,
         )
+        logger.error("Error details: %s", error_msg)
+        
         raise RuntimeError(
-            f"Alarm playback failed (reason={reason}) and no fallback is available."
+            f"Alarm playback failed (reason={reason}) and no fallback is available. {error_msg}"
         )
     
     def play_alarm(self, target_name: str) -> PhaseMetrics:

@@ -606,12 +606,8 @@
         {% if not spotify_connected %}
         <div class="card">
             <div style="text-align: center; padding: 40px 20px;">
-                <!-- Success Message -->
-                {% if auth_success %}
-                <div style="background: #d4edda; color: #155724; padding: 12px; border-radius: 8px; margin-bottom: 20px;">
-                    ✅ Successfully connected to Spotify!
-                    </div>
-                {% endif %}
+                <!-- Success Message - only show if actually connected (not in disconnected state) -->
+                <!-- Note: This block only shows when disconnected, so success message should not appear here -->
                 
                 <!-- Error Message -->
                 {% if auth_error %}
@@ -635,6 +631,15 @@
             </div>
         </div>
         {% else %}
+        <!-- Success Message when connected -->
+        {% if auth_success %}
+        <div class="card" style="background: #d4edda; border: 1px solid #c3e6cb;">
+            <div style="text-align: center; padding: 12px; color: #155724;">
+                ✅ Successfully connected to Spotify!
+            </div>
+        </div>
+        {% endif %}
+        
         <!-- Set New Alarm Form -->
             <div class="card">
             <h2 class="form-title">Set New Alarm</h2>

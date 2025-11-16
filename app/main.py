@@ -112,12 +112,14 @@ DEFAULT_VOLUME = int(os.getenv("DEFAULT_VOLUME", "30"))
 DEFAULT_SHUFFLE = os.getenv("DEFAULT_SHUFFLE", "false").lower() == "true"
 
 # Initialize Spotify OAuth with PKCE
+# Let Spotipy manage the token file directly via cache_path
+# This ensures automatic token saving, loading, and refreshing
 sp_oauth = SpotifyOAuth(
     client_id=SPOTIFY_CLIENT_ID,
     client_secret=SPOTIFY_CLIENT_SECRET,
     redirect_uri=SPOTIFY_REDIRECT_URI,
     scope="user-read-playback-state user-modify-playback-state user-read-currently-playing playlist-read-private",
-    cache_path=TOKEN_FILE,
+    cache_path=str(TOKEN_FILE),  # Spotipy will manage this file automatically
     open_browser=False,
     show_dialog=True
 )
@@ -143,17 +145,65 @@ playlist_cache = None
 playlist_cache_timestamp = None
 playlist_cache_ttl = 300  # Cache playlists for 5 minutes
 
+def _validate_token_file() -> bool:
+    """
+    Validate that token file exists, is not empty, and contains valid JSON.
+    
+    Non-destructive validation - does not delete files, only checks validity.
+    Spotipy manages the token file, so we shouldn't delete it.
+    
+    Returns:
+        True if token file is valid, False otherwise
+    """
+    if not TOKEN_FILE.exists():
+        logger.debug("Token file does not exist")
+        return False
+    
+    # Check if file is empty
+    if TOKEN_FILE.stat().st_size == 0:
+        logger.warning(f"Token file {TOKEN_FILE} is empty (0 bytes). Spotipy will handle this.")
+        return False
+    
+    # Check if file contains valid JSON
+    try:
+        with open(TOKEN_FILE, 'r') as f:
+            content = f.read().strip()
+            if not content:
+                logger.warning(f"Token file {TOKEN_FILE} appears to be empty after reading.")
+                return False
+            json.loads(content)  # Validate JSON
+    except json.JSONDecodeError as e:
+        logger.warning(f"Token file {TOKEN_FILE} contains invalid JSON: {e}. Spotipy will handle this.")
+        return False
+    except Exception as e:
+        logger.error(f"Error validating token file: {e}")
+        return False
+    
+    return True
+
 def get_spotify_client():
     """Get authenticated Spotify client."""
     global spotify
     
     if spotify is None:
         try:
+            # Let Spotipy handle token loading and refresh automatically
+            # get_cached_token() will load from cache_path and refresh if needed
             token_info = sp_oauth.get_cached_token()
             if not token_info:
+                logger.warning("No valid token found. Spotify authentication required.")
                 return None
             
+            # Create Spotify client with auth_manager - spotipy handles token refresh automatically
             spotify = spotipy.Spotify(auth_manager=sp_oauth)
+            
+            # Set proper file permissions on token file if it exists
+            if TOKEN_FILE.exists():
+                try:
+                    os.chmod(TOKEN_FILE, 0o600)  # rw------- for security
+                except Exception as e:
+                    logger.debug(f"Could not set token file permissions: {e}")
+            
         except Exception as e:
             logger.error(f"Error getting Spotify client: {e}")
             return None
@@ -402,12 +452,123 @@ def run_alarm(alarm: Dict[str, Any]) -> None:
             metrics.play_ms,
         )
         
+        # Track metrics for monitoring
+        try:
+            from alarm_config import save_metrics, load_metrics
+            existing_metrics = load_metrics()
+            
+            # Create metric entry
+            metric_entry = {
+                "alarm_id": alarm_id,
+                "timestamp": time.time(),
+                "device_name": target_device_name,
+                "playlist_name": playlist_name,
+                "metrics": metrics.to_dict(),
+                "success": not metrics.branch or not metrics.branch.startswith("failed:"),
+                "failure_reason": metrics.branch.split(":")[1] if metrics.branch and ":" in metrics.branch else None
+            }
+            
+            existing_metrics.append(metric_entry)
+            
+            # Keep only last 100 metrics to prevent file from growing too large
+            if len(existing_metrics) > 100:
+                existing_metrics = existing_metrics[-100:]
+            
+            save_metrics(existing_metrics)
+            
+            # Log specific monitoring for not_in_devices_by_deadline failures
+            if metric_entry["failure_reason"] == "not_in_devices_by_deadline":
+                logger.warning("=" * 60)
+                logger.warning("MONITORING: not_in_devices_by_deadline failure detected")
+                logger.warning(f"  Alarm ID: {alarm_id}")
+                logger.warning(f"  Device: {target_device_name}")
+                logger.warning(f"  Timestamp: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime())}")
+                logger.warning(f"  This failure has been logged to metrics.json for tracking")
+                logger.warning("=" * 60)
+        except Exception as e:
+            logger.debug(f"Could not save metrics: {e}")
+        
         if metrics.errors:
             logger.warning(f"Errors encountered: {len(metrics.errors)}")
             for error in metrics.errors:
-                logger.warning(f"  - {error['error']} (phase: {error.get('phase', 'unknown')})")
+                error_msg = error.get('error', 'Unknown error')
+                error_phase = error.get('phase', 'unknown')
+                logger.warning(f"  - {error_msg} (phase: {error_phase})")
+                
+                # Log helpful guidance for common errors
+                if 'not_in_devices_by_deadline' in error_msg or 'manual authentication' in error_msg.lower():
+                    logger.warning(f"  → TROUBLESHOOTING: Device may need manual authentication via Spotify app")
+                    logger.warning(f"  → ACTION: Open Spotify app, select device '{target_device_name}', play a song")
         
             
+    except RuntimeError as e:
+        error_msg = str(e)
+        alarm_id = alarm.get('id', 'unknown')
+        logger.error(f"Alarm playback failed for alarm {alarm_id}: {error_msg}")
+        
+        # Track failure metrics
+        try:
+            from alarm_config import save_metrics, load_metrics
+            existing_metrics = load_metrics()
+            
+            # Extract failure reason from error message
+            failure_reason = None
+            if 'not_in_devices_by_deadline' in error_msg:
+                failure_reason = "not_in_devices_by_deadline"
+            elif 'no_mdns' in error_msg:
+                failure_reason = "no_mdns"
+            elif 'circuit_breaker' in error_msg:
+                failure_reason = "circuit_breaker_open"
+            
+            metric_entry = {
+                "alarm_id": alarm_id,
+                "timestamp": time.time(),
+                "device_name": target_device_name,
+                "playlist_name": alarm.get('playlist_name', 'Unknown'),
+                "metrics": {
+                    "branch": f"failed:{failure_reason}" if failure_reason else "failed:unknown",
+                    "total_duration_ms": None,
+                    "error_count": 1,
+                    "errors": [{"error": error_msg, "phase": "runtime_error", "timestamp": time.time()}]
+                },
+                "success": False,
+                "failure_reason": failure_reason
+            }
+            
+            existing_metrics.append(metric_entry)
+            
+            # Keep only last 100 metrics
+            if len(existing_metrics) > 100:
+                existing_metrics = existing_metrics[-100:]
+            
+            save_metrics(existing_metrics)
+            
+            # Log monitoring info for not_in_devices_by_deadline
+            if failure_reason == "not_in_devices_by_deadline":
+                logger.warning("=" * 60)
+                logger.warning("MONITORING: not_in_devices_by_deadline failure detected")
+                logger.warning(f"  Alarm ID: {alarm_id}")
+                logger.warning(f"  Device: {target_device_name}")
+                logger.warning(f"  Timestamp: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime())}")
+                logger.warning(f"  This failure has been logged to metrics.json for tracking")
+                logger.warning("=" * 60)
+        except Exception as metric_error:
+            logger.debug(f"Could not save failure metrics: {metric_error}")
+        
+        # Extract helpful guidance from error message
+        if 'manual authentication' in error_msg.lower() or 'not_in_devices_by_deadline' in error_msg:
+            logger.error("=" * 60)
+            logger.error("TROUBLESHOOTING GUIDE:")
+            logger.error(f"  Device '{target_device_name}' needs manual authentication.")
+            logger.error("  Steps to fix:")
+            logger.error("  1. Open Spotify app on your phone or computer")
+            logger.error(f"  2. Look for '{target_device_name}' in available devices")
+            logger.error("  3. Select it and play any song to authenticate")
+            logger.error("  4. Wait a few seconds, then retry the alarm")
+            logger.error("=" * 60)
+        
+        import traceback
+        logger.debug(f"Traceback: {traceback.format_exc()}")
     except Exception as e:
         logger.error(f"Error running alarm {alarm.get('id', 'unknown')}: {e}")
         import traceback
@@ -687,7 +848,7 @@ def background_cache_refresh():
                                 fresh_name = device.name  # Fallback to saved name
                         
                         # Health check uses getInfo internally, but we can use a longer timeout since we're not in a hurry
-                        health_info = check_device_health(device.ip, device.port, device.cpath, timeout_s=0.1)
+                        health_info = check_device_health(device.ip, device.port, device.cpath, timeout_s=1.0)
                         devices_list.append({
                             "name": fresh_name,  # Use fresh name from getInfo
                             "ip": device.ip,
@@ -750,7 +911,7 @@ def background_cache_refresh():
                         dev_name = dev.instance_name or f"Device at {dev.ip}"
                     
                     if dev_name not in device_names_seen and dev.ip and dev.port:
-                        health_info = check_device_health(dev.ip, dev.port, dev.cpath or "/", timeout_s=0.1)
+                        health_info = check_device_health(dev.ip, dev.port, dev.cpath or "/", timeout_s=1.0)
                         devices_list.append({
                             "name": dev_name,
                             "ip": dev.ip,
@@ -854,12 +1015,20 @@ async def home(request: Request):
         if playlist_cache and playlist_cache_timestamp and (time.time() - playlist_cache_timestamp) < playlist_cache_ttl:
             playlists = playlist_cache
         else:
-            playlists_response = sp.current_user_playlists(limit=50)
-            playlists = playlists_response.get('items', [])
-            playlist_cache = playlists
-            playlist_cache_timestamp = time.time()
+            if not sp:
+                logger.warning("Cannot fetch playlists: Spotify client is not available. Token may be missing or invalid.")
+            else:
+                playlists_response = sp.current_user_playlists(limit=50)
+                playlists = playlists_response.get('items', [])
+                playlist_cache = playlists
+                playlist_cache_timestamp = time.time()
     except Exception as e:
         logger.error(f"Error getting playlists: {e}")
+        # Log additional context for debugging
+        if not sp:
+            logger.error("  Spotify client is None - authentication may be required")
+        elif not _validate_token_file():
+            logger.error("  Token file is missing, empty, or invalid - re-authentication required")
     
     # Get all devices from cache (fast - no mDNS on every page load)
     all_devices = []
@@ -887,7 +1056,7 @@ async def home(request: Request):
                 for device in mdn_result:
                     # Discovery共同lt doesn't have is_online, check via health check
                     from alarm_playback.zeroconf_client import check_device_health
-                    health_info = check_device_health(device.ip, device.port, device.cpath or "/", timeout_s=0.1)
+                    health_info = check_device_health(device.ip, device.port, device.cpath or "/", timeout_s=1.0)
                     
                     # Use DeviceRegistry to get name from device properties (getInfo)
                     device_name = None
@@ -947,12 +1116,28 @@ async def get_playlists():
     try:
         sp = get_spotify_client()
         if not sp:
-            raise HTTPException(status_code=401, detail="Not authenticated with Spotify")
+            # Provide detailed error message based on token file state
+            if not TOKEN_FILE.exists():
+                error_detail = "Spotify token file not found. Please authenticate with Spotify."
+            elif TOKEN_FILE.stat().st_size == 0:
+                error_detail = "Spotify token file is empty. Please re-authenticate with Spotify."
+            elif not _validate_token_file():
+                error_detail = "Spotify token file is invalid or corrupted. Please re-authenticate with Spotify."
+            else:
+                error_detail = "Not authenticated with Spotify. Please authenticate to access playlists."
+            logger.warning(f"Failed to get Spotify client for playlists: {error_detail}")
+            raise HTTPException(status_code=401, detail=error_detail)
         
         playlists_response = sp.current_user_playlists(limit=50)
         return {"playlists": playlists_response.get('items', [])}
+    except HTTPException:
+        # Re-raise HTTP exceptions (like 401) as-is
+        raise
     except Exception as e:
         logger.error(f"Error getting playlists: {e}")
+        # Log additional context for debugging
+        if not _validate_token_file():
+            logger.error("  Token file validation failed - this may be the root cause")
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/api/spotify/devices")
@@ -1079,7 +1264,7 @@ async def get_devices():
                     # Check if device is online (skip health check for cached results)
                     if dev.ip and dev.port:
                         health_info = check_device_health(
-                            dev.ip, dev.port, dev.cpath or "/", timeout_s=0.1  # Optimized for speed
+                            dev.ip, dev.port, dev.cpath or "/", timeout_s=1.0  # Increased timeout for slower devices
                         )
                         devices_list.append({
                             "name": dev_name,
@@ -1357,11 +1542,27 @@ async def callback(request: Request):
     
     try:
         # Exchange code for token
-        token_info = sp_oauth.get_access_token(code)
+        # get_access_token() handles OAuth exchange and automatically saves to cache_path
+        # Spotipy manages the token file automatically, no manual saving needed
+        # Note: get_access_token() may return just a string in future versions,
+        # but get_cached_token() always returns the full token dict
+        sp_oauth.get_access_token(code)
         
-        # Save token to file
-        with open(TOKEN_FILE, 'w') as f:
-            json.dump(token_info, f)
+        # Verify token was saved by spotipy and get the full token info
+        token_info = sp_oauth.get_cached_token()
+        if not token_info:
+            raise ValueError("Failed to get token after OAuth exchange")
+        
+        # Ensure parent directory exists (spotipy should have created it, but be safe)
+        TOKEN_FILE.parent.mkdir(parents=True, exist_ok=True)
+        
+        # Set proper file permissions for security (rw-------)
+        if TOKEN_FILE.exists():
+            try:
+                os.chmod(TOKEN_FILE, 0o600)
+                logger.info(f"Token saved successfully to {TOKEN_FILE} ({TOKEN_FILE.stat().st_size} bytes)")
+            except Exception as e:
+                logger.warning(f"Could not set token file permissions: {e}")
         
         logger.info("Spotify authentication successful")
         return RedirectResponse(url="/?connected=true")
