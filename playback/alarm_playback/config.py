@@ -96,6 +96,18 @@ class Timings(BaseModel):
     confirmation_sleep_s: float = Field(default=0.2, ge=0.1, le=1.0, description="Sleep time in confirmation loop")
     poll_sleep_fast_s: float = Field(default=0.5, ge=0.1, le=2.0, description="Sleep time during fast polling")
     poll_sleep_slow_s: float = Field(default=1.0, ge=0.1, le=5.0, description="Sleep time during slow polling")
+    post_auth_grace_s: int = Field(
+        default=20,
+        ge=0,
+        le=120,
+        description="Additional grace window after addUser success to continue polling for the device",
+    )
+    post_auth_grace_sleep_s: float = Field(
+        default=1.5,
+        ge=0.1,
+        le=5.0,
+        description="Polling interval during the post-auth grace window",
+    )
 
 
 class PlaybackMetrics(BaseModel):

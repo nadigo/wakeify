@@ -162,7 +162,7 @@ Timings(
 
 ```
 UNKNOWN → DISCOVERED → LOCAL_AWAKE → LOGGED_IN → CLOUD_VISIBLE → STAGED → PLAYING
-             ↓
+                ↓
      DEEP_SLEEP_SUSPECTED
 ```
 

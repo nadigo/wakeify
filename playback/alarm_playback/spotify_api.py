@@ -77,25 +77,25 @@ class TokenManager:
                 token_info = oauth.get_cached_token()
                 if not token_info:
                     token_info = self._load_token_from_file()
-                
-                if not token_info and self.auth_config.refresh_token:
-                    try:
-                        token_info = oauth.refresh_access_token(self.auth_config.refresh_token)
-                        refreshed = True
-                        logger.info("Successfully refreshed Spotify token from environment refresh token")
-                    except Exception as exc:
-                        logger.error(f"Failed to refresh Spotify token from environment: {exc}")
-                        raise
-                elif not token_info:
-                    raise ValueError("No Spotify token available in cache, file, or environment refresh token")
-                
-                if token_info:
-                    token_info = dict(token_info)
-                    self._synchronize_refresh_token(token_info)
-                
-                if refreshed and token_info:
-                    self._save_token_to_file(token_info)
-                self._token_info = token_info
+                    
+                    if not token_info and self.auth_config.refresh_token:
+                        try:
+                            token_info = oauth.refresh_access_token(self.auth_config.refresh_token)
+                            refreshed = True
+                            logger.info("Successfully refreshed Spotify token from environment refresh token")
+                        except Exception as exc:
+                            logger.error(f"Failed to refresh Spotify token from environment: {exc}")
+                            raise
+                    elif not token_info:
+                        raise ValueError("No Spotify token available in cache, file, or environment refresh token")
+                    
+                    if token_info:
+                        token_info = dict(token_info)
+                        self._synchronize_refresh_token(token_info)
+                    
+                    if refreshed and token_info:
+                        self._save_token_to_file(token_info)
+                    self._token_info = token_info
             
             if not self._token_info:
                 raise ValueError("Spotify token info unavailable after initialization")
@@ -151,12 +151,12 @@ class TokenManager:
             token_file = self._token_file_path()
             if token_file.exists():
                 token_data = json.loads(token_file.read_text())
-                # Check if token is still valid (not expired)
+                    # Check if token is still valid (not expired)
                 if token_data.get('expires_at', 0) > time.time():
-                    return token_data
-                # If expired but has refresh_token, return it for refresh
+                        return token_data
+                    # If expired but has refresh_token, return it for refresh
                 if 'refresh_token' in token_data:
-                    return token_data
+                        return token_data
         except Exception as e:
             logger.error(f"Failed to load token from file: {e}")
         return None
@@ -242,7 +242,7 @@ class SpotifyApiWrapper:
             self._client_token = access_token
             # Force next validation call to re-run, since we built a new client
             self._last_validation_ts = 0.0
-            return self._spotify
+        return self._spotify
 
     def _reset_client(self, invalidate_cache: bool = False) -> None:
         """Drop cached Spotify client safely."""
@@ -549,7 +549,7 @@ class SpotifyApiWrapper:
                 logger.info(f"Started playback on device {device_id}")
                 
             self.invalidate_device_cache()
-            
+                
         except SpotifyException as e:
             if e.http_status == 401:
                 logger.warning("Access token expired, refreshing...")

@@ -76,6 +76,83 @@
             box-shadow: 0 2px 10px rgba(0, 0, 0, 0.1);
             border: 1px solid rgba(0, 0, 0, 0.05);
         }
+
+        .card.warning-card {
+            background: #fff7ed;
+            border-left: 4px solid #f97316;
+            color: #7c2d12;
+        }
+
+        .warning-card h2 {
+            font-size: 16px;
+            font-weight: 600;
+            margin-bottom: 10px;
+        }
+
+        .warning-card p {
+            font-size: 14px;
+            margin-bottom: 8px;
+        }
+
+        .warning-card ul {
+            list-style: none;
+            padding: 0;
+            margin: 0;
+            display: grid;
+            gap: 6px;
+        }
+
+        .warning-card li {
+            background: rgba(249, 115, 22, 0.15);
+            border-radius: 6px;
+            padding: 6px 10px;
+            font-size: 14px;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .warning-card li::before {
+            content: "⚠️";
+            font-size: 14px;
+        }
+
+        .theme-selector {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 12px;
+            padding: 14px 0;
+            border-bottom: 1px solid #e5e5e7;
+        }
+
+        .theme-selector:last-child {
+            border-bottom: none;
+        }
+
+        .theme-selector label {
+            font-size: 13px;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            color: #86868b;
+        }
+
+        .theme-selector select {
+            flex: 1;
+            padding: 10px 12px;
+            border-radius: 8px;
+            border: 1px solid #d1d1d6;
+            background: #ffffff;
+            color: #1d1d1f;
+            font-size: 14px;
+            transition: border-color 0.2s, box-shadow 0.2s;
+        }
+
+        .theme-selector select:focus {
+            outline: none;
+            border-color: #3b82f6;
+            box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.15);
+        }
         
         /* Active Alarms Section */
         .alarms-header {
@@ -539,6 +616,18 @@
                 <path d="M12 1v6m0 6v6m11-7h-6m-6 0H1"></path>
             </svg>
         </div>
+
+        {% if manual_auth_devices %}
+        <div class="card warning-card">
+            <h2>Manual Spotify Activation Needed</h2>
+            <p>Select each device below in the Spotify app and play a track once to finish linking it.</p>
+            <ul>
+                {% for device in manual_auth_devices %}
+                <li>{{ device }}</li>
+                {% endfor %}
+            </ul>
+        </div>
+        {% endif %}
         
         <!-- Active Alarms Section -->
             <div class="card">
@@ -782,9 +871,11 @@
         const volumeSlider = document.getElementById('volume');
         const volumeDisplay = document.getElementById('volume-display');
         
-        volumeSlider.addEventListener('input', function() {
-            volumeDisplay.textContent = this.value;
-        });
+        if (volumeSlider && volumeDisplay) {
+            volumeSlider.addEventListener('input', function() {
+                volumeDisplay.textContent = this.value;
+            });
+        }
         
         // System status panel
         function toggleStatusPanel() {
@@ -847,6 +938,17 @@
                 alert('Failed to stop playback');
             }
         }
+
+        document.addEventListener('DOMContentLoaded', () => {
+            const uiThemeSelector = document.getElementById('ui-theme-selector');
+            if (uiThemeSelector) {
+                uiThemeSelector.addEventListener('change', (event) => {
+                    const view = event.target.value;
+                    const target = view === 'aurora' ? '/aurora' : '/';
+                    window.location.href = target;
+                });
+            }
+        });
     </script>
     
     <!-- Status Panel Modal -->
@@ -856,6 +958,14 @@
                 <h2 class="modal-title">System Status</h2>
                 <button class="modal-close" onclick="closeStatusPanel()">✕</button>
             </div>
+            
+        <div class="theme-selector">
+            <label for="ui-theme-selector">UI Theme</label>
+            <select id="ui-theme-selector">
+                <option value="basic" {% if active_view == 'classic' %}selected{% endif %}>Basic</option>
+                <option value="aurora" {% if active_view == 'aurora' %}selected{% endif %}>Aurora</option>
+            </select>
+        </div>
             
             <!-- Connection Status -->
             <div class="status-section">

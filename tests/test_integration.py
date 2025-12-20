@@ -148,7 +148,7 @@ class TestAlarmSystemIntegration(unittest.TestCase):
         self.assertEqual(len(devices), 1)
         self.assertEqual(devices[0].name, "Test Device")
         self.assertTrue(devices[0].is_active)
-
+    
 class TestPlaybackEngine(unittest.TestCase):
     """Test playback engine functionality"""
     

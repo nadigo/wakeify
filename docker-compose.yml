@@ -75,7 +75,7 @@ services:
       # Monitoring Configuration
       - METRICS_ENABLED=${METRICS_ENABLED:-true}
       - HEALTH_CHECK_INTERVAL_S=${HEALTH_CHECK_INTERVAL_S:-30}
-    
+      
     cap_add:
       - NET_ADMIN
       - NET_RAW
