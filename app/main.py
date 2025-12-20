@@ -4,6 +4,7 @@ import logging
 import threading
 import time
 import asyncio
+import sys
 from datetime import datetime, timedelta
 from typing import Dict, List, Any, Optional
 from pathlib import Path
@@ -15,6 +16,23 @@ from fastapi.templating import Jinja2Templates
 from fastapi.staticfiles import StaticFiles
 import spotipy
 from spotipy.oauth2 import SpotifyOAuth
+
+# Monkey-patch input() to prevent interactive OAuth prompts in non-interactive environments
+# This prevents spotipy from trying to read from stdin when it can't get a token
+try:
+    import builtins
+    _original_input = getattr(builtins, 'input', None)
+    
+    def _non_interactive_input(prompt=''):
+        """Raise EOFError immediately to prevent interactive OAuth prompts."""
+        raise EOFError("Interactive input not available in non-interactive environment")
+    
+    if _original_input:
+        # Replace input() with our non-interactive version
+        builtins.input = _non_interactive_input
+except Exception:
+    # If monkey-patching fails, silently continue (shouldn't happen in normal operation)
+    pass
 
 # Import the comprehensive playback engine
 from alarm_playback import AlarmPlaybackEngine
@@ -128,6 +146,7 @@ sp_oauth = SpotifyOAuth(
 alarms: List[Dict[str, Any]] = []
 devices: List[Dict[str, Any]] = []
 spotify = None
+spotify_lock = threading.Lock()  # Thread-safe access to spotify client
 scheduler = None
 running = True
 alarm_config = None
@@ -156,7 +175,6 @@ def _validate_token_file() -> bool:
         True if token file is valid, False otherwise
     """
     if not TOKEN_FILE.exists():
-        logger.debug("Token file does not exist")
         return False
     
     # Check if file is empty
@@ -181,34 +199,181 @@ def _validate_token_file() -> bool:
     
     return True
 
+def _is_token_expired(token_info: Optional[Dict[str, Any]], margin_seconds: int = 300) -> bool:
+    """
+    Check if token is expired or will expire within margin_seconds.
+    
+    Args:
+        token_info: Token info dict from spotipy
+        margin_seconds: Refresh if token expires within this many seconds (default 5 minutes)
+    
+    Returns:
+        True if token is expired or will expire soon, False otherwise
+    """
+    if not token_info:
+        return True
+    
+    expires_at = token_info.get('expires_at')
+    if not expires_at:
+        # If no expiration info, assume it's valid (spotipy will handle refresh)
+        return False
+    
+    current_time = time.time()
+    time_until_expiry = expires_at - current_time
+    
+    if time_until_expiry <= 0:
+        return True
+    
+    if time_until_expiry <= margin_seconds:
+        return True
+    
+    return False
+
+def _invalidate_spotify_caches():
+    """Invalidate all Spotify-related caches when authentication fails."""
+    global playlist_cache, playlist_cache_timestamp, device_cache, device_cache_timestamp
+    
+    playlist_cache = None
+    playlist_cache_timestamp = None
+    device_cache = None
+    device_cache_timestamp = None
+
+def _check_token_exists() -> bool:
+    """
+    Check if a token file exists and is valid JSON.
+    
+    Trust spotipy's auth_manager to handle token refresh automatically during API calls.
+    This function only validates that we have a token file to work with.
+    
+    Returns:
+        True if token file exists and is valid JSON, False otherwise
+    """
+    if not TOKEN_FILE.exists():
+        return False
+    
+    return _validate_token_file()
+
+def _retry_spotify_api(func, max_retries: int = 3, base_delay: float = 1.0):
+    """
+    Retry Spotify API call with exponential backoff.
+    
+    Args:
+        func: Callable that makes the API call
+        max_retries: Maximum number of retry attempts
+        base_delay: Base delay in seconds for exponential backoff
+    
+    Returns:
+        Result of func() if successful
+    
+    Raises:
+        Exception: If all retries fail
+    """
+    last_exception = None
+    
+    for attempt in range(max_retries):
+        try:
+            return func()
+        except EOFError as e:
+            # Don't retry EOFError - it's an auth issue
+            logger.error(f"EOFError in Spotify API call (attempt {attempt + 1}): {e}")
+            raise
+        except spotipy.SpotifyException as e:
+            # Don't retry 401 (Unauthorized) - it's an auth issue
+            if e.http_status == 401:
+                logger.error(f"401 Unauthorized in Spotify API call (attempt {attempt + 1}): {e}")
+                raise
+            
+            # Don't retry 4xx errors (client errors) except rate limiting
+            if 400 <= e.http_status < 500 and e.http_status != 429:
+                logger.error(f"Client error {e.http_status} in Spotify API call (attempt {attempt + 1}): {e}")
+                raise
+            
+            last_exception = e
+            if attempt < max_retries - 1:
+                delay = base_delay * (2 ** attempt)
+                logger.warning(f"Spotify API error (attempt {attempt + 1}/{max_retries}): {e}. Retrying in {delay:.1f}s...")
+                time.sleep(delay)
+        except Exception as e:
+            last_exception = e
+            if attempt < max_retries - 1:
+                delay = base_delay * (2 ** attempt)
+                logger.warning(f"Error in Spotify API call (attempt {attempt + 1}/{max_retries}): {e}. Retrying in {delay:.1f}s...")
+                time.sleep(delay)
+    
+    # All retries failed
+    logger.error(f"Spotify API call failed after {max_retries} attempts")
+    raise last_exception
+
 def get_spotify_client():
-    """Get authenticated Spotify client."""
+    """
+    Get authenticated Spotify client (thread-safe).
+    
+    Trusts spotipy's auth_manager to handle token refresh automatically during API calls.
+    When using Spotify(auth_manager=SpotifyOAuth(cache_path=...)), spotipy automatically:
+    - Loads tokens from cache_path
+    - Refreshes tokens when expired (during API calls)
+    - Saves refreshed tokens back to cache_path
+    
+    We only need to check if a token file exists before creating the client.
+    """
     global spotify
     
+    # Use double-checked locking pattern for thread safety
     if spotify is None:
-        try:
-            # Let Spotipy handle token loading and refresh automatically
-            # get_cached_token() will load from cache_path and refresh if needed
-            token_info = sp_oauth.get_cached_token()
-            if not token_info:
-                logger.warning("No valid token found. Spotify authentication required.")
-                return None
-            
-            # Create Spotify client with auth_manager - spotipy handles token refresh automatically
-            spotify = spotipy.Spotify(auth_manager=sp_oauth)
-            
-            # Set proper file permissions on token file if it exists
-            if TOKEN_FILE.exists():
+        with spotify_lock:
+            # Check again after acquiring lock (another thread might have created it)
+            if spotify is None:
                 try:
-                    os.chmod(TOKEN_FILE, 0o600)  # rw------- for security
+                    # Check if token file exists and is valid JSON
+                    # Trust spotipy's auth_manager to handle refresh automatically
+                    if not _check_token_exists():
+                        logger.warning("No token file found or token file is invalid. Spotify authentication required.")
+                        return None
+                    
+                    # Try to get cached token to verify it exists (but don't refresh manually)
+                    # This prevents spotipy from trying interactive OAuth if no token exists
+                    try:
+                        token_info = sp_oauth.get_cached_token()
+                        if not token_info:
+                            logger.warning("No valid token found in cache. Spotify authentication required.")
+                            return None
+                        
+                        # Token expiration is handled automatically by auth_manager during API calls
+                    except EOFError as e:
+                        logger.error(f"EOFError getting cached token (interactive auth attempted in non-interactive environment): {e}")
+                        return None
+                    
+                    # Create Spotify client with auth_manager - spotipy handles token refresh automatically
+                    # The monkey-patched input() function will prevent interactive OAuth prompts
+                    try:
+                        spotify = spotipy.Spotify(auth_manager=sp_oauth)
+                    except EOFError as e:
+                        logger.error(f"EOFError creating Spotify client (interactive auth attempted in non-interactive environment): {e}")
+                        return None
+                    
+                    # Set proper file permissions on token file if it exists
+                    if TOKEN_FILE.exists():
+                        try:
+                            os.chmod(TOKEN_FILE, 0o600)  # rw------- for security
+                        except Exception:
+                            pass
+                    
+                except EOFError as e:
+                    logger.error(f"EOFError getting Spotify client (interactive auth attempted in non-interactive environment): {e}")
+                    return None
                 except Exception as e:
-                    logger.debug(f"Could not set token file permissions: {e}")
-            
-        except Exception as e:
-            logger.error(f"Error getting Spotify client: {e}")
-            return None
+                    logger.error(f"Error getting Spotify client: {e}")
+                    return None
     
     return spotify
+
+def _reset_spotify_client():
+    """Reset Spotify client and invalidate caches (thread-safe)."""
+    global spotify
+    
+    with spotify_lock:
+        spotify = None
+        _invalidate_spotify_caches()
 
 def get_spotify_auth_url():
     """Generate Spotify OAuth authorization URL."""
@@ -245,10 +410,8 @@ def save_data():
     try:
         with open(ALARMS_FILE, 'w') as f:
             json.dump(alarms, f, indent=2)
-        logger.debug(f"Saved {len(alarms)} alarm(s) to {ALARMS_FILE}")
         with open(DEVICES_FILE, 'w') as f:
             json.dump(devices, f, indent=2)
-        logger.debug(f"Saved {len(devices)} device(s) to {DEVICES_FILE}")
     except Exception as e:
         logger.error(f"Error saving data: {e}")
         import traceback
@@ -288,8 +451,6 @@ def run_alarm(alarm: Dict[str, Any]) -> None:
             return
         
         # Use comprehensive playback engine
-        logger.debug("Using comprehensive playback engine with T-60s timeline")
-        
         # Try to get existing device profile first, but don't create new ones via mDNS
         # Let the orchestrator handle Web API discovery first
         device_profile = None
@@ -300,7 +461,6 @@ def run_alarm(alarm: Dict[str, Any]) -> None:
         
         # If no profile found, try to discover the device via mDNS and create profile with IP
         if not device_profile:
-            logger.debug(f"Device {target_device_name} not found in registry, attempting mDNS discovery")
             try:
                 from alarm_playback.discovery import discover_all_connect_devices
                 # Discover all devices
@@ -324,8 +484,8 @@ def run_alarm(alarm: Dict[str, Any]) -> None:
                         if device_registry:
                             # This will call getInfo to get remoteName/displayName, or fallback to instance_name
                             dev_name = device_registry._extract_friendly_name(dev)
-                    except Exception as e:
-                        logger.debug(f"Error extracting name for device: {e}")
+                    except Exception:
+                        pass
                     
                     if not dev_name:
                         dev_name = dev_instance
@@ -348,23 +508,10 @@ def run_alarm(alarm: Dict[str, Any]) -> None:
                             cpath=dev.cpath or "/spotifyconnect/zeroconf",
                             volume_preset=DEFAULT_VOLUME
                         )
-                        logger.debug(
-                            "✓ Discovered device via mDNS: friendly_name='%s', instance_name='%s' (matched alarm target '%s')",
-                            dev_name,
-                            dev.instance_name,
-                            target_device_name,
-                        )
-                        logger.debug(
-                            "Device profile created at %s:%s, cpath=%s",
-                            dev.ip,
-                            dev.port,
-                            dev.cpath,
-                        )
                         break
                 
                 # If still no profile, create minimal one
                 if not device_profile:
-                    logger.debug(f"Could not discover {target_device_name} via mDNS, creating minimal profile")
                     device_profile = DeviceProfile(
                         name=target_device_name,
                         volume_preset=DEFAULT_VOLUME
@@ -392,7 +539,6 @@ def run_alarm(alarm: Dict[str, Any]) -> None:
         # If not found in targets, add it
         if not found_in_targets:
             alarm_config.targets.append(device_profile)
-            logger.debug(f"Added device {target_device_name} to orchestrator targets with volume {alarm_volume}%")
             # Save the device profile permanently so it persists with instance_name
             try:
                 import json
@@ -403,9 +549,8 @@ def run_alarm(alarm: Dict[str, Any]) -> None:
                 devices_file = str(DEVICES_FILE)
                 with open(devices_file, 'w') as f:
                     json.dump(device_data, f, indent=2)
-                logger.debug(f"Saved device profile for {target_device_name}")
-            except Exception as e:
-                logger.debug(f"Could not save device profile: {e}")
+            except Exception:
+                pass
         
         # Update context URI in config
         alarm_config.context_uri = playlist_uri
@@ -418,7 +563,6 @@ def run_alarm(alarm: Dict[str, Any]) -> None:
         engine = AlarmPlaybackEngine(alarm_config)
         
         # Execute full timeline
-        logger.debug(f"Starting T-60s timeline for {target_device_name}")
         metrics = engine.play_alarm(target_device_name)
         
         # Save device profiles after alarm execution to persist any learned Spotify device names
@@ -431,9 +575,8 @@ def run_alarm(alarm: Dict[str, Any]) -> None:
             devices_file = str(DEVICES_FILE)
             with open(devices_file, 'w') as f:
                 json.dump(device_data, f, indent=2)
-            logger.debug(f"Saved device profiles after alarm execution")
-        except Exception as e:
-            logger.debug(f"Could not save device profiles after alarm: {e}")
+        except Exception:
+            pass
         
         # Log results
         logger.info(
@@ -441,15 +584,6 @@ def run_alarm(alarm: Dict[str, Any]) -> None:
             alarm_id,
             metrics.total_duration_ms,
             metrics.branch,
-        )
-        logger.debug(
-            "Alarm %s metrics: discovery=%sms getInfo=%sms addUser=%sms cloud_visible=%sms play=%sms",
-            alarm_id,
-            metrics.discovered_ms,
-            metrics.getinfo_ms,
-            metrics.adduser_ms,
-            metrics.cloud_visible_ms,
-            metrics.play_ms,
         )
         
         # Track metrics for monitoring
@@ -475,18 +609,8 @@ def run_alarm(alarm: Dict[str, Any]) -> None:
                 existing_metrics = existing_metrics[-100:]
             
             save_metrics(existing_metrics)
-            
-            # Log specific monitoring for not_in_devices_by_deadline failures
-            if metric_entry["failure_reason"] == "not_in_devices_by_deadline":
-                logger.warning("=" * 60)
-                logger.warning("MONITORING: not_in_devices_by_deadline failure detected")
-                logger.warning(f"  Alarm ID: {alarm_id}")
-                logger.warning(f"  Device: {target_device_name}")
-                logger.warning(f"  Timestamp: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime())}")
-                logger.warning(f"  This failure has been logged to metrics.json for tracking")
-                logger.warning("=" * 60)
-        except Exception as e:
-            logger.debug(f"Could not save metrics: {e}")
+        except Exception:
+            pass
         
         if metrics.errors:
             logger.warning(f"Errors encountered: {len(metrics.errors)}")
@@ -552,8 +676,8 @@ def run_alarm(alarm: Dict[str, Any]) -> None:
                 logger.warning(f"  Timestamp: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime())}")
                 logger.warning(f"  This failure has been logged to metrics.json for tracking")
                 logger.warning("=" * 60)
-        except Exception as metric_error:
-            logger.debug(f"Could not save failure metrics: {metric_error}")
+        except Exception:
+            pass
         
         # Extract helpful guidance from error message
         if 'manual authentication' in error_msg.lower() or 'not_in_devices_by_deadline' in error_msg:
@@ -566,9 +690,6 @@ def run_alarm(alarm: Dict[str, Any]) -> None:
             logger.error("  3. Select it and play any song to authenticate")
             logger.error("  4. Wait a few seconds, then retry the alarm")
             logger.error("=" * 60)
-        
-        import traceback
-        logger.debug(f"Traceback: {traceback.format_exc()}")
     except Exception as e:
         logger.error(f"Error running alarm {alarm.get('id', 'unknown')}: {e}")
         import traceback
@@ -579,7 +700,6 @@ def prewarm_device(alarm: Dict[str, Any]) -> None:
     try:
         alarm_id = alarm.get('id')
         target_device_name = alarm.get("device_name", DEFAULT_SPEAKER)
-        logger.debug(f"Prewarming device {target_device_name} for alarm {alarm_id}")
         
         # Find device profile
         device_profile = None
@@ -605,27 +725,22 @@ def prewarm_device(alarm: Dict[str, Any]) -> None:
                             cpath=dev.cpath or "/spotifyconnect/zeroconf",
                             volume_preset=DEFAULT_VOLUME
                         )
-                        logger.debug(f"Discovered device {dev.instance_name} for prewarm")
                         break
-            except Exception as e:
-                logger.debug(f"Could not discover device during prewarm: {e}")
+            except Exception:
+                pass
         
         # Wake up device if we have IP
         if device_profile and device_profile.ip:
             try:
                 from alarm_playback.fallback import _wake_device_via_ip
-                logger.debug(f"Waking device {target_device_name} via IP {device_profile.ip}")
                 _wake_device_via_ip(
                     device_profile.ip,
                     device_profile.port or 80,
                     device_profile.cpath or "/spotifyconnect/zeroconf",
                     target_device_name
                 )
-                logger.debug(f"Successfully prewarmed device {target_device_name}")
             except Exception as e:
                 logger.warning(f"Prewarm failed for {target_device_name}: {e}")
-        else:
-            logger.debug(f"No IP available for prewarm of {target_device_name}")
             
     except Exception as e:
         logger.error(f"Error during prewarm for alarm {alarm.get('id', 'unknown')}: {e}")
@@ -675,7 +790,6 @@ def schedule_alarms():
                 id=f"prewarm_{alarm_id}",
                 replace_existing=True
             )
-            logger.debug(f"Scheduled prewarm for alarm {alarm_id} at {prewarm_hour:02d}:{prewarm_minute:02d} on {dow}")
             
             # Schedule alarm start
             trigger = CronTrigger(hour=hour, minute=minute, day_of_week=day_of_week)
@@ -687,7 +801,6 @@ def schedule_alarms():
                 replace_existing=True,
                 misfire_grace_time=None  # Allow misfired alarms to run regardless of delay
             )
-            logger.debug(f"Scheduled alarm {alarm_id} for {hour:02d}:{minute:02d} on {dow}")
             
             # Schedule alarm stop if stop time is set
             stop_hour = alarm.get('stop_hour')
@@ -702,7 +815,6 @@ def schedule_alarms():
                     replace_existing=True,
                     misfire_grace_time=None  # Allow misfired alarms to run regardless of delay
                 )
-                logger.debug(f"Scheduled stop for alarm {alarm_id} at {stop_hour:02d}:{stop_minute:02d}")
         except Exception as e:
             logger.error(f"Failed to schedule alarm {alarm_id}: {e}")
 
@@ -714,10 +826,18 @@ def stop_alarm_playback(alarm_id: str):
     sp = get_spotify_client()
     if sp:
         try:
-            sp.pause_playback()
+            _retry_spotify_api(lambda: sp.pause_playback(), max_retries=2)
             logger.info(f"Successfully paused Spotify playback for alarm {alarm_id}")
+        except spotipy.SpotifyException as e:
+            if e.http_status == 404 or "NO_ACTIVE_DEVICE" in str(e):
+                pass
+            elif e.http_status == 401:
+                logger.warning(f"401 Unauthorized pausing playback for alarm {alarm_id} - token may be expired")
+                _reset_spotify_client()
+            else:
+                logger.error(f"Failed to pause Spotify playback for alarm {alarm_id}: {e}")
         except Exception as e:
-            logger.error(f"Failed to pause Spotify playback: {e}")
+            logger.error(f"Failed to pause Spotify playback for alarm {alarm_id}: {e}")
     
     logger.info(f"Removed alarm {alarm_id} from active playback tracking")
 
@@ -735,8 +855,16 @@ def background_device_registration():
             sp = get_spotify_client()
             if sp and alarm_config.targets:
                 try:
-                    devices = sp.devices()
+                    devices = _retry_spotify_api(lambda: sp.devices(), max_retries=2)
                     spotify_device_names = {d['name'].upper() for d in devices.get('devices', [])}
+                except (EOFError, spotipy.SpotifyException) as e:
+                    if isinstance(e, spotipy.SpotifyException) and e.http_status == 401:
+                        logger.warning("401 Unauthorized checking Spotify devices - token may be expired")
+                        _reset_spotify_client()
+                    continue
+                except Exception:
+                    continue
+                try:
                     
                     # Check each device in targets
                     for device in alarm_config.targets:
@@ -747,16 +875,14 @@ def background_device_registration():
                                           for d in devices.get('devices', []))
                         
                         if not device_found:
-                            logger.debug(f"{device.name} not in Spotify devices - attempting background registration")
-                            
                             try:
                                 from alarm_playback.fallback import _mdns_auth_user_registration
                                 _mdns_auth_user_registration(device.ip, device.name)
-                            except Exception as e:
-                                logger.debug(f"Background registration attempt failed for {device.name}: {e}")
+                            except Exception:
+                                pass
                             
-                except Exception as e:
-                    logger.debug(f"Error checking devices in background task: {e}")
+                except Exception:
+                    pass
             
             time.sleep(60)  # Check every minute
             
@@ -774,12 +900,10 @@ def background_cache_refresh():
             
             # Skip if cache is still fresh (within 600s = 10 minutes)
             if device_cache_timestamp and (time.time() - device_cache_timestamp) < 600:
-                logger.debug("Cache still fresh, skipping refresh")
                 continue
             
             # Skip if alarm_config not initialized
             if not alarm_config:
-                logger.debug("Alarm config not initialized, skipping cache refresh")
                 continue
             
             # Call the cache refresh logic synchronously
@@ -803,7 +927,6 @@ def background_cache_refresh():
                             cached_name, cached_time = friendly_name_cache[cache_key]
                             if (current_time - cached_time) < friendly_name_cache_ttl:
                                 fresh_name = cached_name
-                                logger.debug(f"Using cached friendly name '{fresh_name}' for {device.ip}:{device.port}")
                             else:
                                 # Cache expired, remove it
                                 del friendly_name_cache[cache_key]
@@ -841,10 +964,9 @@ def background_cache_refresh():
                                         }
                                         with open(DEVICES_FILE, 'w') as f:
                                             json.dump(device_data, f, indent=2)
-                                    except Exception as e:
-                                        logger.debug(f"Could not save updated name for {device.name}: {e}")
-                            except Exception as e:
-                                logger.debug(f"Could not refresh name for {device.name} from getInfo: {e}")
+                                    except Exception:
+                                        pass
+                            except Exception:
                                 fresh_name = device.name  # Fallback to saved name
                         
                         # Health check uses getInfo internally, but we can use a longer timeout since we're not in a hurry
@@ -871,9 +993,6 @@ def background_cache_refresh():
                 if (current_time - last_discovery_time) >= discovery_interval:
                     mdns_devices = discover_all_connect_devices(1.0)
                     background_cache_refresh._last_full_discovery = current_time
-                    logger.debug(f"Full mDNS discovery completed, found {len(mdns_devices)} devices")
-                else:
-                    logger.debug(f"Skipping full mDNS discovery (last discovery was {(current_time - last_discovery_time):.0f}s ago)")
                 
                 for dev in mdns_devices:
                     # Check friendly name cache first
@@ -885,7 +1004,6 @@ def background_cache_refresh():
                         cached_name, cached_time = friendly_name_cache[cache_key]
                         if (current_time - cached_time) < friendly_name_cache_ttl:
                             dev_name = cached_name
-                            logger.debug(f"Using cached friendly name '{dev_name}' for {dev.ip}:{dev.port}")
                     
                     # Only call getInfo if not cached
                     if not dev_name:
@@ -903,8 +1021,6 @@ def background_cache_refresh():
                                     logger.info(f"_extract_friendly_name returned None for {dev.instance_name} ({dev.ip}:{dev.port})")
                         except Exception as e:
                             logger.warning(f"Error extracting friendly name for {dev.instance_name}: {e}")
-                            import traceback
-                            logger.debug(f"Traceback: {traceback.format_exc()}")
                     
                     # Fallback to instance_name if extraction failed
                     if not dev_name:
@@ -928,7 +1044,7 @@ def background_cache_refresh():
                 sp = get_spotify_client()
                 if sp:
                     try:
-                        spotify_devices = sp.devices()
+                        spotify_devices = _retry_spotify_api(lambda: sp.devices(), max_retries=2)
                         for dev in spotify_devices.get('devices', []):
                             dev_name = dev.get('name', 'Unknown')
                             if dev_name not in device_names_seen:
@@ -943,8 +1059,12 @@ def background_cache_refresh():
                                     "error": None if dev.get('is_active', False) else "Device inactive"
                                 })
                                 device_names_seen.add(dev_name)
-                    except Exception as e:
-                        logger.debug(f"Failed to get Spotify devices: {e}")
+                    except (EOFError, spotipy.SpotifyException) as e:
+                        if isinstance(e, spotipy.SpotifyException) and e.http_status == 401:
+                            logger.warning("401 Unauthorized getting Spotify devices - token may be expired")
+                            _reset_spotify_client()
+                    except Exception:
+                        pass
                 
                 # Update cache
                 device_cache = {
@@ -984,6 +1104,8 @@ async def health():
 @app.get("/", response_class=HTMLResponse)
 async def home(request: Request):
     """Main page."""
+    global spotify  # Declare global at function level
+    
     # Check for callback parameters
     connected = request.query_params.get("connected")
     error = request.query_params.get("error")
@@ -1018,10 +1140,33 @@ async def home(request: Request):
             if not sp:
                 logger.warning("Cannot fetch playlists: Spotify client is not available. Token may be missing or invalid.")
             else:
-                playlists_response = sp.current_user_playlists(limit=50)
-                playlists = playlists_response.get('items', [])
-                playlist_cache = playlists
-                playlist_cache_timestamp = time.time()
+                try:
+                    # Use retry mechanism for API call
+                    playlists_response = _retry_spotify_api(
+                        lambda: sp.current_user_playlists(limit=50)
+                    )
+                    playlists = playlists_response.get('items', [])
+                    playlist_cache = playlists
+                    playlist_cache_timestamp = time.time()
+                except EOFError as e:
+                    logger.error(f"EOFError getting playlists (interactive auth attempted during API call): {e}")
+                    _reset_spotify_client()
+                    playlists = []
+                except spotipy.SpotifyException as e:
+                    if e.http_status == 401:
+                        logger.error(f"401 Unauthorized getting playlists - token expired or invalid")
+                        _reset_spotify_client()
+                    else:
+                        logger.error(f"Spotify API error getting playlists (HTTP {e.http_status}): {e}")
+                    playlists = []
+                except Exception as e:
+                    logger.error(f"Unexpected error getting playlists: {e}")
+                    playlists = []
+    except EOFError as e:
+        logger.error(f"EOFError getting playlists (interactive auth attempted): {e}")
+        # Reset the global spotify client to force re-authentication
+        _reset_spotify_client()
+        playlists = []
     except Exception as e:
         logger.error(f"Error getting playlists: {e}")
         # Log additional context for debugging
@@ -1067,8 +1212,8 @@ async def home(request: Request):
                             from device_registry import DeviceRegistry
                             device_registry = DeviceRegistry(alarm_config)
                             device_name = device_registry._extract_friendly_name(device)
-                    except Exception as e:
-                        logger.debug(f"Error extracting friendly name: {e}")
+                    except Exception:
+                        pass
                     
                     # Fallback to instance_name if extraction failed
                     if not device_name:
@@ -1082,15 +1227,23 @@ async def home(request: Request):
                     mdn_device_names.add(device_name.upper())
                 
                 # Get Spotify devices (not already found via mDNS)
-                devices_response = sp.devices()
-                for dev in devices_response.get('devices', []):
-                    dev_name = dev.get('name', 'Unknown')
-                    if dev_name.upper() not in mdn_device_names:
-                        all_devices.append({
-                            "name": dev_name,
-                            "ip": None,
-                            "is_online": dev.get('is_active', False)
-                        })
+                if sp:
+                    try:
+                        devices_response = _retry_spotify_api(lambda: sp.devices(), max_retries=2)
+                        for dev in devices_response.get('devices', []):
+                            dev_name = dev.get('name', 'Unknown')
+                            if dev_name.upper() not in mdn_device_names:
+                                all_devices.append({
+                                    "name": dev_name,
+                                    "ip": None,
+                                    "is_online": dev.get('is_active', False)
+                                })
+                    except (EOFError, spotipy.SpotifyException) as e:
+                        if isinstance(e, spotipy.SpotifyException) and e.http_status == 401:
+                            logger.warning("401 Unauthorized getting Spotify devices - token may be expired")
+                            _reset_spotify_client()
+                    except Exception:
+                        pass
             except Exception as e:
                 logger.error(f"Error getting devices: {e}")
                 all_devices = []
@@ -1113,6 +1266,8 @@ async def home(request: Request):
 @app.get("/api/playlists")
 async def get_playlists():
     """Get all Spotify playlists."""
+    global spotify  # Declare global at function level
+    
     try:
         sp = get_spotify_client()
         if not sp:
@@ -1128,11 +1283,35 @@ async def get_playlists():
             logger.warning(f"Failed to get Spotify client for playlists: {error_detail}")
             raise HTTPException(status_code=401, detail=error_detail)
         
-        playlists_response = sp.current_user_playlists(limit=50)
-        return {"playlists": playlists_response.get('items', [])}
+        try:
+            # Use retry mechanism for API call
+            playlists_response = _retry_spotify_api(
+                lambda: sp.current_user_playlists(limit=50)
+            )
+            return {"playlists": playlists_response.get('items', [])}
+        except EOFError as e:
+            logger.error(f"EOFError getting playlists (interactive auth attempted during API call): {e}")
+            _reset_spotify_client()
+            raise HTTPException(status_code=401, detail="Spotify authentication required. Please re-authenticate.")
+        except spotipy.SpotifyException as e:
+            if e.http_status == 401:
+                logger.error(f"401 Unauthorized getting playlists - token expired or invalid")
+                _reset_spotify_client()
+                raise HTTPException(status_code=401, detail="Spotify authentication expired. Please re-authenticate.")
+            elif e.http_status == 429:
+                logger.error(f"Rate limit exceeded getting playlists")
+                raise HTTPException(status_code=429, detail="Spotify API rate limit exceeded. Please try again later.")
+            else:
+                logger.error(f"Spotify API error getting playlists (HTTP {e.http_status}): {e}")
+                raise HTTPException(status_code=500, detail=f"Spotify API error: {str(e)}")
     except HTTPException:
         # Re-raise HTTP exceptions (like 401) as-is
         raise
+    except EOFError as e:
+        logger.error(f"EOFError getting playlists (interactive auth attempted): {e}")
+        # Reset the global spotify client to force re-authentication
+        _reset_spotify_client()
+        raise HTTPException(status_code=401, detail="Spotify authentication required. Please re-authenticate.")
     except Exception as e:
         logger.error(f"Error getting playlists: {e}")
         # Log additional context for debugging
@@ -1146,13 +1325,29 @@ async def get_spotify_devices():
     try:
         sp = get_spotify_client()
         if not sp:
-            raise HTTPException(status_code=401, detail="Not authenticated with Spotify")
+            raise HTTPException(status_code=401, detail="Not authenticated with Spotify. Please connect your Spotify account.")
         
-        devices = sp.devices()
+        # Use retry mechanism for API call
+        devices = _retry_spotify_api(lambda: sp.devices())
         return {"devices": devices.get('devices', [])}
+    except EOFError as e:
+        logger.error(f"EOFError getting Spotify devices: {e}")
+        _reset_spotify_client()
+        raise HTTPException(status_code=401, detail="Spotify authentication required. Please re-authenticate.")
+    except spotipy.SpotifyException as e:
+        if e.http_status == 401:
+            logger.error(f"401 Unauthorized getting Spotify devices - token expired or invalid")
+            _reset_spotify_client()
+            raise HTTPException(status_code=401, detail="Spotify authentication expired. Please re-authenticate.")
+        elif e.http_status == 429:
+            logger.error(f"Rate limit exceeded getting Spotify devices")
+            raise HTTPException(status_code=429, detail="Spotify API rate limit exceeded. Please try again later.")
+        else:
+            logger.error(f"Spotify API error getting devices (HTTP {e.http_status}): {e}")
+            raise HTTPException(status_code=500, detail=f"Spotify API error: {str(e)}")
     except Exception as e:
-        logger.error(f"Error getting Spotify devices: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error(f"Unexpected error getting Spotify devices: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to get Spotify devices: {str(e)}")
 
 @app.get("/api/devices")
 async def get_devices():
@@ -1168,7 +1363,6 @@ async def get_devices():
         
         # Check cache first
         if device_cache and device_cache_timestamp and (time.time() - device_cache_timestamp) < device_cache_ttl:
-            logger.debug("Returning cached device list")
             return device_cache
         
         # Get devices from config AND Spotify
@@ -1177,7 +1371,6 @@ async def get_devices():
         
         # First, add devices from config - but refresh names from getInfo
         if alarm_config.targets:
-            logger.debug(f"Using {len(alarm_config.targets)} devices from config")
             for device in alarm_config.targets:
                 # Try to get fresh friendly name from getInfo (overrides saved name)
                 fresh_name = device.name  # Default to saved name
@@ -1204,10 +1397,9 @@ async def get_devices():
                             # Update the device profile with the fresh name
                             device.name = fresh_name
                             alarm_config.save_device_profiles()
-                        except Exception as e:
-                            logger.debug(f"Could not save updated name for {device.name}: {e}")
-                except Exception as e:
-                    logger.debug(f"Could not refresh name for {device.name} from getInfo: {e}")
+                        except Exception:
+                            pass
+                except Exception:
                     fresh_name = device.name  # Fallback to saved name
                 
                 # Check if device is online
@@ -1249,15 +1441,12 @@ async def get_devices():
                         from device_registry import DeviceRegistry
                         device_registry = DeviceRegistry(alarm_config)
                         dev_name = device_registry._extract_friendly_name(dev)
-                        if not dev_name:
-                            logger.debug(f"getInfo failed for {dev.instance_name} ({dev.ip}), using instance name")
                 except Exception as e:
                     logger.error(f"Error extracting friendly name for {dev.instance_name}: {e}")
                 
                 # Fallback to instance_name if extraction failed
                 if not dev_name:
                     dev_name = dev.instance_name or f"Device at {dev.ip}"
-                    logger.debug(f"Using fallback name '{dev_name}' for {dev.instance_name}")
                 
                 # Only add if not already in list
                 if dev_name not in device_names_seen:
@@ -1284,12 +1473,13 @@ async def get_devices():
         try:
             sp = get_spotify_client()
             if sp:
-                spotify_devices = sp.devices()
-                for dev in spotify_devices.get('devices', []):
-                    dev_name = dev.get('name', 'Unknown')
-                    # Only add if not already in list from config or mDNS
-                    if dev_name not in device_names_seen:
-                        devices_list.append({
+                try:
+                    spotify_devices = _retry_spotify_api(lambda: sp.devices(), max_retries=2)
+                    for dev in spotify_devices.get('devices', []):
+                        dev_name = dev.get('name', 'Unknown')
+                        # Only add if not already in list from config or mDNS
+                        if dev_name not in device_names_seen:
+                            devices_list.append({
                             "name": dev_name,
                             "ip": None,
                             "port": None,
@@ -1298,10 +1488,16 @@ async def get_devices():
                             "last_seen": time.time() if dev.get('is_active', False) else None,
                             "response_time_ms": None,
                             "error": None if dev.get('is_active', False) else "Device inactive"
-                        })
-                        device_names_seen.add(dev_name)
-        except Exception as e:
-            logger.debug(f"Failed to get Spotify devices: {e}")
+                            })
+                            device_names_seen.add(dev_name)
+                except (EOFError, spotipy.SpotifyException) as e:
+                    if isinstance(e, spotipy.SpotifyException) and e.http_status == 401:
+                        logger.warning("401 Unauthorized getting Spotify devices - token may be expired")
+                        _reset_spotify_client()
+                except Exception:
+                    pass
+        except Exception:
+            pass
         
         # Calculate counts
         total_devices = len(devices_list)
@@ -1356,14 +1552,12 @@ async def refresh_devices():
 async def disconnect_spotify():
     """Disconnect from Spotify by deleting token."""
     try:
-        global spotify
-        
         # Delete token file
         if TOKEN_FILE.exists():
             TOKEN_FILE.unlink()
         
-        # Clear global spotify client
-        spotify = None
+        # Clear global spotify client and caches
+        _reset_spotify_client()
         
         logger.info("Spotify disconnected")
         return {"status": "success", "message": "Disconnected from Spotify"}
@@ -1505,26 +1699,42 @@ async def stop_current_playback():
         
         # Check if anything is playing
         try:
-            current = sp.current_playback()
+            current = _retry_spotify_api(lambda: sp.current_playback())
             if not current or not current.get('is_playing'):
                 return {"status": "info", "message": "Nothing is playing"}
-        except Exception as e:
+        except spotipy.SpotifyException as e:
             # If we can't check, just try to stop
-            logger.debug(f"Could not check playback status: {e}")
+            if e.http_status == 404 or "NO_ACTIVE_DEVICE" in str(e):
+                return {"status": "info", "message": "No active device found"}
+        except Exception:
+            pass
         
         # Stop playback
-        sp.pause_playback()
-        logger.info("Stopped current playback")
-        return {"status": "success", "message": "Playback stopped"}
-    except spotipy.SpotifyException as e:
-        # Handle Spotify API errors gracefully
-        if e.http_status == 404 or "NO_ACTIVE_DEVICE" in str(e):
-            return {"status": "info", "message": "Nothing is playing"}
-        logger.error(f"Error stopping playback: {e}")
-        raise HTTPException(status_code=500, detail="Failed to stop playback")
+        try:
+            _retry_spotify_api(lambda: sp.pause_playback())
+            logger.info("Stopped current playback")
+            return {"status": "success", "message": "Playback stopped"}
+        except spotipy.SpotifyException as e:
+            # Handle Spotify API errors gracefully
+            if e.http_status == 404 or "NO_ACTIVE_DEVICE" in str(e):
+                return {"status": "info", "message": "No active device found"}
+            elif e.http_status == 401:
+                logger.error(f"401 Unauthorized stopping playback - token expired or invalid")
+                _reset_spotify_client()
+                raise HTTPException(status_code=401, detail="Spotify authentication expired. Please re-authenticate.")
+            else:
+                logger.error(f"Spotify API error stopping playback (HTTP {e.http_status}): {e}")
+                raise HTTPException(status_code=500, detail=f"Failed to stop playback: {str(e)}")
+    except EOFError as e:
+        logger.error(f"EOFError stopping playback: {e}")
+        _reset_spotify_client()
+        raise HTTPException(status_code=401, detail="Spotify authentication required. Please re-authenticate.")
+    except HTTPException:
+        # Re-raise HTTP exceptions
+        raise
     except Exception as e:
-        logger.error(f"Error stopping playback: {e}")
-        raise HTTPException(status_code=500, detail="Failed to stop playback")
+        logger.error(f"Unexpected error stopping playback: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to stop playback: {str(e)}")
 
 @app.get("/callback")
 async def callback(request: Request):
@@ -1543,12 +1753,12 @@ async def callback(request: Request):
     try:
         # Exchange code for token
         # get_access_token() handles OAuth exchange and automatically saves to cache_path
-        # Spotipy manages the token file automatically, no manual saving needed
+        # Spotipy manages the token file automatically via cache_path - no manual saving needed
         # Note: get_access_token() may return just a string in future versions,
         # but get_cached_token() always returns the full token dict
         sp_oauth.get_access_token(code)
         
-        # Verify token was saved by spotipy and get the full token info
+        # Verify token was saved by spotipy (it saves automatically to cache_path)
         token_info = sp_oauth.get_cached_token()
         if not token_info:
             raise ValueError("Failed to get token after OAuth exchange")
@@ -1557,10 +1767,11 @@ async def callback(request: Request):
         TOKEN_FILE.parent.mkdir(parents=True, exist_ok=True)
         
         # Set proper file permissions for security (rw-------)
+        # Note: spotipy already saved the token to cache_path, we're just setting permissions
         if TOKEN_FILE.exists():
             try:
                 os.chmod(TOKEN_FILE, 0o600)
-                logger.info(f"Token saved successfully to {TOKEN_FILE} ({TOKEN_FILE.stat().st_size} bytes)")
+                logger.info(f"Token saved by spotipy to {TOKEN_FILE} ({TOKEN_FILE.stat().st_size} bytes)")
             except Exception as e:
                 logger.warning(f"Could not set token file permissions: {e}")
         
