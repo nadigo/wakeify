@@ -3,8 +3,6 @@ import json
 import logging
 import threading
 import time
-import asyncio
-import sys
 import traceback
 from datetime import datetime, timedelta
 from typing import Dict, List, Any, Optional
@@ -61,8 +59,8 @@ async def lifespan(app: FastAPI):
     global scheduler, alarm_config
     
     logger.info("Starting Wakeify")
-    load_data()  # This function is defined later, but Python supports this
-    load_health_check_settings()  # Load health check settings
+    load_data()
+    load_health_check_settings()
     
     # Initialize alarm configuration
     alarm_config = AlarmPlaybackConfig()
@@ -72,10 +70,7 @@ async def lifespan(app: FastAPI):
     scheduler.start()
     logger.info("Scheduler initialized")
     
-    # Schedule all alarms
-    schedule_alarms()  # This function is defined later, but Python supports this
-    
-    # Schedule health check
+    schedule_alarms()
     schedule_health_check()
     
     # Start background device registration (generic for all devices)
@@ -1709,15 +1704,13 @@ async def home(request: Request):
         all_devices = []
         
     # Get health check status for UI
-    # Reload health check settings to get latest status
     load_health_check_settings()
     
-    # Always show health check status if available (even if None, to show "No health checks run yet")
-    # Debug logging
+    last_status = health_check_settings.get("last_status")
     health_check_status = {
-        "last_status": health_check_settings.get("last_status"),
+        "last_status": last_status,
         "last_check": health_check_settings.get("last_check"),
-        "has_issues": health_check_settings.get("last_status") != "healthy" if health_check_settings.get("last_status") else False
+        "has_issues": last_status != "healthy" if last_status else False
     }
     
     return templates.TemplateResponse("index.html", {
