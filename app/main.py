@@ -322,8 +322,8 @@ def get_spotify_client():
     if spotify is None:
         with spotify_lock:
             # Check again after acquiring lock (another thread might have created it)
-            if spotify is None:
-                try:
+    if spotify is None:
+        try:
                     # Check if token file exists and is valid JSON
                     # Trust spotipy's auth_manager to handle refresh automatically
                     if not _check_token_exists():
@@ -333,37 +333,37 @@ def get_spotify_client():
                     # Try to get cached token to verify it exists (but don't refresh manually)
                     # This prevents spotipy from trying interactive OAuth if no token exists
                     try:
-                        token_info = sp_oauth.get_cached_token()
-                        if not token_info:
+            token_info = sp_oauth.get_cached_token()
+            if not token_info:
                             logger.warning("No valid token found in cache. Spotify authentication required.")
                             return None
                         
                         # Token expiration is handled automatically by auth_manager during API calls
                     except EOFError as e:
                         logger.error(f"EOFError getting cached token (interactive auth attempted in non-interactive environment): {e}")
-                        return None
-                    
-                    # Create Spotify client with auth_manager - spotipy handles token refresh automatically
+                return None
+            
+            # Create Spotify client with auth_manager - spotipy handles token refresh automatically
                     # The monkey-patched input() function will prevent interactive OAuth prompts
                     try:
-                        spotify = spotipy.Spotify(auth_manager=sp_oauth)
+            spotify = spotipy.Spotify(auth_manager=sp_oauth)
                     except EOFError as e:
                         logger.error(f"EOFError creating Spotify client (interactive auth attempted in non-interactive environment): {e}")
                         return None
-                    
-                    # Set proper file permissions on token file if it exists
-                    if TOKEN_FILE.exists():
-                        try:
-                            os.chmod(TOKEN_FILE, 0o600)  # rw------- for security
+            
+            # Set proper file permissions on token file if it exists
+            if TOKEN_FILE.exists():
+                try:
+                    os.chmod(TOKEN_FILE, 0o600)  # rw------- for security
                         except Exception:
                             pass
-                    
+            
                 except EOFError as e:
                     logger.error(f"EOFError getting Spotify client (interactive auth attempted in non-interactive environment): {e}")
                     return None
-                except Exception as e:
-                    logger.error(f"Error getting Spotify client: {e}")
-                    return None
+        except Exception as e:
+            logger.error(f"Error getting Spotify client: {e}")
+            return None
     
     return spotify
 
@@ -1145,9 +1145,9 @@ async def home(request: Request):
                     playlists_response = _retry_spotify_api(
                         lambda: sp.current_user_playlists(limit=50)
                     )
-                    playlists = playlists_response.get('items', [])
-                    playlist_cache = playlists
-                    playlist_cache_timestamp = time.time()
+                playlists = playlists_response.get('items', [])
+                playlist_cache = playlists
+                playlist_cache_timestamp = time.time()
                 except EOFError as e:
                     logger.error(f"EOFError getting playlists (interactive auth attempted during API call): {e}")
                     _reset_spotify_client()
@@ -1230,14 +1230,14 @@ async def home(request: Request):
                 if sp:
                     try:
                         devices_response = _retry_spotify_api(lambda: sp.devices(), max_retries=2)
-                        for dev in devices_response.get('devices', []):
-                            dev_name = dev.get('name', 'Unknown')
-                            if dev_name.upper() not in mdn_device_names:
-                                all_devices.append({
-                                    "name": dev_name,
-                                    "ip": None,
-                                    "is_online": dev.get('is_active', False)
-                                })
+                for dev in devices_response.get('devices', []):
+                    dev_name = dev.get('name', 'Unknown')
+                    if dev_name.upper() not in mdn_device_names:
+                        all_devices.append({
+                            "name": dev_name,
+                            "ip": None,
+                            "is_online": dev.get('is_active', False)
+                        })
                     except (EOFError, spotipy.SpotifyException) as e:
                         if isinstance(e, spotipy.SpotifyException) and e.http_status == 401:
                             logger.warning("401 Unauthorized getting Spotify devices - token may be expired")
@@ -1288,7 +1288,7 @@ async def get_playlists():
             playlists_response = _retry_spotify_api(
                 lambda: sp.current_user_playlists(limit=50)
             )
-            return {"playlists": playlists_response.get('items', [])}
+        return {"playlists": playlists_response.get('items', [])}
         except EOFError as e:
             logger.error(f"EOFError getting playlists (interactive auth attempted during API call): {e}")
             _reset_spotify_client()
@@ -1475,11 +1475,11 @@ async def get_devices():
             if sp:
                 try:
                     spotify_devices = _retry_spotify_api(lambda: sp.devices(), max_retries=2)
-                    for dev in spotify_devices.get('devices', []):
-                        dev_name = dev.get('name', 'Unknown')
-                        # Only add if not already in list from config or mDNS
-                        if dev_name not in device_names_seen:
-                            devices_list.append({
+                for dev in spotify_devices.get('devices', []):
+                    dev_name = dev.get('name', 'Unknown')
+                    # Only add if not already in list from config or mDNS
+                    if dev_name not in device_names_seen:
+                        devices_list.append({
                             "name": dev_name,
                             "ip": None,
                             "port": None,
@@ -1488,8 +1488,8 @@ async def get_devices():
                             "last_seen": time.time() if dev.get('is_active', False) else None,
                             "response_time_ms": None,
                             "error": None if dev.get('is_active', False) else "Device inactive"
-                            })
-                            device_names_seen.add(dev_name)
+                        })
+                        device_names_seen.add(dev_name)
                 except (EOFError, spotipy.SpotifyException) as e:
                     if isinstance(e, spotipy.SpotifyException) and e.http_status == 401:
                         logger.warning("401 Unauthorized getting Spotify devices - token may be expired")
@@ -1712,11 +1712,11 @@ async def stop_current_playback():
         # Stop playback
         try:
             _retry_spotify_api(lambda: sp.pause_playback())
-            logger.info("Stopped current playback")
-            return {"status": "success", "message": "Playback stopped"}
-        except spotipy.SpotifyException as e:
-            # Handle Spotify API errors gracefully
-            if e.http_status == 404 or "NO_ACTIVE_DEVICE" in str(e):
+        logger.info("Stopped current playback")
+        return {"status": "success", "message": "Playback stopped"}
+    except spotipy.SpotifyException as e:
+        # Handle Spotify API errors gracefully
+        if e.http_status == 404 or "NO_ACTIVE_DEVICE" in str(e):
                 return {"status": "info", "message": "No active device found"}
             elif e.http_status == 401:
                 logger.error(f"401 Unauthorized stopping playback - token expired or invalid")
