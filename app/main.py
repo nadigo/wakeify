@@ -5,6 +5,7 @@ import threading
 import time
 import asyncio
 import sys
+import traceback
 from datetime import datetime, timedelta
 from typing import Dict, List, Any, Optional
 from pathlib import Path
@@ -36,7 +37,7 @@ except Exception:
 
 # Import the comprehensive playback engine
 from alarm_playback import AlarmPlaybackEngine
-from alarm_playback.config import AlarmPlaybackConfig, DeviceProfile, PlaybackMetrics
+from alarm_playback.config import AlarmPlaybackConfig, DeviceProfile
 
 # Import APScheduler for better scheduling
 from apscheduler.schedulers.background import BackgroundScheduler
@@ -61,6 +62,7 @@ async def lifespan(app: FastAPI):
     
     logger.info("Starting Wakeify")
     load_data()  # This function is defined later, but Python supports this
+    load_health_check_settings()  # Load health check settings
     
     # Initialize alarm configuration
     alarm_config = AlarmPlaybackConfig()
@@ -72,6 +74,9 @@ async def lifespan(app: FastAPI):
     
     # Schedule all alarms
     schedule_alarms()  # This function is defined later, but Python supports this
+    
+    # Schedule health check
+    schedule_health_check()
     
     # Start background device registration (generic for all devices)
     registration_thread = threading.Thread(target=background_device_registration, daemon=True)
@@ -118,6 +123,7 @@ DATA_DIR.mkdir(exist_ok=True)
 ALARMS_FILE = DATA_DIR / "alarms.json"
 DEVICES_FILE = DATA_DIR / "devices.json"
 TOKEN_FILE = DATA_DIR / "token.json"
+HEALTH_CHECK_SETTINGS_FILE = DATA_DIR / "health_check_settings.json"
 
 # Spotify configuration
 SPOTIFY_CLIENT_ID = os.getenv("SPOTIFY_CLIENT_ID")
@@ -150,6 +156,18 @@ spotify_lock = threading.Lock()  # Thread-safe access to spotify client
 scheduler = None
 running = True
 alarm_config = None
+health_check_settings: Dict[str, Any] = {
+    "enabled": False,
+    "interval_days": 3,
+    "time": "09:00",
+    "email": {
+        "enabled": False,
+        "recipient": "",
+        "gmail_app_password": ""
+    },
+    "last_check": None,
+    "last_status": None
+}
 
 # Performance: Device cache
 device_cache = None
@@ -322,8 +340,8 @@ def get_spotify_client():
     if spotify is None:
         with spotify_lock:
             # Check again after acquiring lock (another thread might have created it)
-    if spotify is None:
-        try:
+            if spotify is None:
+                try:
                     # Check if token file exists and is valid JSON
                     # Trust spotipy's auth_manager to handle refresh automatically
                     if not _check_token_exists():
@@ -333,37 +351,38 @@ def get_spotify_client():
                     # Try to get cached token to verify it exists (but don't refresh manually)
                     # This prevents spotipy from trying interactive OAuth if no token exists
                     try:
-            token_info = sp_oauth.get_cached_token()
-            if not token_info:
+                        token_info = sp_oauth.get_cached_token()
+                        if not token_info:
                             logger.warning("No valid token found in cache. Spotify authentication required.")
                             return None
                         
                         # Token expiration is handled automatically by auth_manager during API calls
                     except EOFError as e:
                         logger.error(f"EOFError getting cached token (interactive auth attempted in non-interactive environment): {e}")
-                return None
-            
-            # Create Spotify client with auth_manager - spotipy handles token refresh automatically
+                        return None
+                    
+                    # Create Spotify client with auth_manager - spotipy handles token refresh automatically
                     # The monkey-patched input() function will prevent interactive OAuth prompts
                     try:
-            spotify = spotipy.Spotify(auth_manager=sp_oauth)
+                        spotify = spotipy.Spotify(auth_manager=sp_oauth)
                     except EOFError as e:
                         logger.error(f"EOFError creating Spotify client (interactive auth attempted in non-interactive environment): {e}")
                         return None
-            
-            # Set proper file permissions on token file if it exists
-            if TOKEN_FILE.exists():
-                try:
-                    os.chmod(TOKEN_FILE, 0o600)  # rw------- for security
+                    
+                    # Set proper file permissions on token file if it exists
+                    if TOKEN_FILE.exists():
+                        try:
+                            os.chmod(TOKEN_FILE, 0o600)  # rw------- for security
                         except Exception:
                             pass
-            
+                    
+                    
                 except EOFError as e:
                     logger.error(f"EOFError getting Spotify client (interactive auth attempted in non-interactive environment): {e}")
                     return None
-        except Exception as e:
-            logger.error(f"Error getting Spotify client: {e}")
-            return None
+                except Exception as e:
+                    logger.error(f"Error getting Spotify client: {e}")
+                    return None
     
     return spotify
 
@@ -414,8 +433,345 @@ def save_data():
             json.dump(devices, f, indent=2)
     except Exception as e:
         logger.error(f"Error saving data: {e}")
-        import traceback
         logger.error(f"Traceback: {traceback.format_exc()}")
+
+def load_health_check_settings():
+    """Load health check settings from file."""
+    global health_check_settings
+    
+    if HEALTH_CHECK_SETTINGS_FILE.exists():
+        try:
+            with open(HEALTH_CHECK_SETTINGS_FILE, 'r') as f:
+                loaded_settings = json.load(f)
+                # Merge with defaults - update only the keys that exist in loaded_settings
+                for key, value in loaded_settings.items():
+                    health_check_settings[key] = value
+                # Ensure email dict exists
+                if "email" not in health_check_settings:
+                    health_check_settings["email"] = {
+                        "enabled": False,
+                        "recipient": "",
+                        "gmail_app_password": ""
+                    }
+        except Exception as e:
+            logger.error(f"Error loading health check settings: {e}")
+            logger.error(f"Traceback: {traceback.format_exc()}")
+            # Keep defaults
+
+def save_health_check_settings():
+    """Save health check settings to file."""
+    try:
+        # Ensure data directory exists
+        data_dir = HEALTH_CHECK_SETTINGS_FILE.parent
+        if not data_dir.exists():
+            data_dir.mkdir(parents=True, exist_ok=True)
+            logger.info(f"Created data directory: {data_dir}")
+        
+        # Ensure email dict exists before saving
+        if "email" not in health_check_settings:
+            health_check_settings["email"] = {
+                "enabled": False,
+                "recipient": "",
+                "gmail_app_password": ""
+            }
+        
+        with open(HEALTH_CHECK_SETTINGS_FILE, 'w') as f:
+            json.dump(health_check_settings, f, indent=2)
+        logger.info(f"Health check settings saved to {HEALTH_CHECK_SETTINGS_FILE}")
+    except Exception as e:
+        logger.error(f"Error saving health check settings: {e}")
+        logger.error(f"Traceback: {traceback.format_exc()}")
+        raise  # Re-raise so caller can handle it
+
+def run_health_check() -> Dict[str, Any]:
+    """
+    Run health check to verify Spotify connection and device availability.
+    
+    Returns:
+        Dictionary with health check results including:
+        - timestamp: When check was performed
+        - spotify_connection: Status of Spotify connection
+        - devices: List of device statuses for active alarms
+        - overall_status: "healthy", "warning", or "error"
+        - issues: List of issues found
+    """
+    logger.info("Running health check...")
+    check_time = time.time()
+    results = {
+        "timestamp": check_time,
+        "spotify_connection": {
+            "status": "unknown",
+            "token_valid": False,
+            "api_accessible": False,
+            "error": None
+        },
+        "devices": [],
+        "overall_status": "healthy",
+        "issues": []
+    }
+    
+    try:
+        # Check Spotify connection
+        try:
+            sp = get_spotify_client()
+            if sp:
+                results["spotify_connection"]["token_valid"] = True
+                results["spotify_connection"]["status"] = "connected"
+                
+                # Test API accessibility
+                try:
+                    devices_response = _retry_spotify_api(lambda: sp.devices(), max_retries=2)
+                    spotify_devices = devices_response.get('devices', [])
+                    results["spotify_connection"]["api_accessible"] = True
+                    logger.info(f"Spotify API accessible, found {len(spotify_devices)} devices")
+                except Exception as e:
+                    results["spotify_connection"]["api_accessible"] = False
+                    results["spotify_connection"]["error"] = str(e)
+                    results["spotify_connection"]["status"] = "api_error"
+                    results["issues"].append(f"Spotify API not accessible: {e}")
+                    logger.warning(f"Spotify API not accessible: {e}")
+            else:
+                results["spotify_connection"]["status"] = "disconnected"
+                results["spotify_connection"]["error"] = "No Spotify client available"
+                results["issues"].append("Spotify not connected - authentication required")
+                logger.warning("Spotify not connected")
+        except Exception as e:
+            results["spotify_connection"]["status"] = "error"
+            results["spotify_connection"]["error"] = str(e)
+            results["issues"].append(f"Spotify connection error: {e}")
+            logger.error(f"Error checking Spotify connection: {e}")
+        
+        # Get active alarms
+        active_alarms = [a for a in alarms if a.get('active', True)]
+        logger.info(f"Checking {len(active_alarms)} active alarms")
+        
+        # Get Spotify devices for checking
+        spotify_devices = []
+        if results["spotify_connection"]["api_accessible"]:
+            try:
+                sp = get_spotify_client()
+                if sp:
+                    devices_response = _retry_spotify_api(lambda: sp.devices(), max_retries=2)
+                    spotify_devices = devices_response.get('devices', [])
+            except Exception:
+                pass  # Already handled above
+        
+        # Check each active alarm's device
+        for alarm in active_alarms:
+            device_name = alarm.get('device_name', DEFAULT_SPEAKER)
+            alarm_id = alarm.get('id', 'unknown')
+            alarm_time = f"{alarm.get('hour', 0):02d}:{alarm.get('minute', 0):02d}"
+            
+            device_status = {
+                "device_name": device_name,
+                "alarm_id": alarm_id,
+                "alarm_time": alarm_time,
+                "available_in_spotify": False,
+                "is_active": False,
+                "mdns_discoverable": False,
+                "issues": []
+            }
+            
+            # Check if device is in Spotify API
+            if spotify_devices:
+                for spotify_device in spotify_devices:
+                    spotify_device_name = spotify_device.get('name', '')
+                    # Case-insensitive matching
+                    if spotify_device_name.lower().strip() == device_name.lower().strip():
+                        device_status["available_in_spotify"] = True
+                        device_status["is_active"] = spotify_device.get('is_active', False)
+                        device_status["device_id"] = spotify_device.get('id')
+                        break
+            
+            if not device_status["available_in_spotify"]:
+                device_status["issues"].append(f"Device '{device_name}' not found in Spotify API")
+                results["issues"].append(f"Alarm '{alarm_id}' ({alarm_time}): Device '{device_name}' not available in Spotify")
+            
+            # Optionally check mDNS discovery
+            try:
+                from alarm_playback.discovery import discover_all_connect_devices
+                discovered_devices = discover_all_connect_devices(timeout_s=2.0)
+                
+                # Try to match device by name
+                for discovered in discovered_devices:
+                    discovered_name = discovered.instance_name or ""
+                    # Try to get friendly name if possible
+                    try:
+                        if alarm_config:
+                            import sys
+                            sys.path.insert(0, str(APP_DIR))
+                            from device_registry import DeviceRegistry
+                            device_registry = DeviceRegistry(alarm_config)
+                            friendly_name = device_registry._extract_friendly_name(discovered)
+                            if friendly_name and friendly_name.lower().strip() == device_name.lower().strip():
+                                device_status["mdns_discoverable"] = True
+                                break
+                            if discovered_name.lower().strip() == device_name.lower().strip():
+                                device_status["mdns_discoverable"] = True
+                                break
+                    except Exception:
+                        # Fallback to instance name matching
+                        if discovered_name.lower().strip() == device_name.lower().strip():
+                            device_status["mdns_discoverable"] = True
+                            break
+            except Exception:
+                pass
+            
+            results["devices"].append(device_status)
+        
+        # Determine overall status
+        if results["spotify_connection"]["status"] != "connected":
+            results["overall_status"] = "error"
+        elif results["issues"]:
+            # Check if any devices are unavailable
+            unavailable_devices = [d for d in results["devices"] if not d["available_in_spotify"]]
+            if unavailable_devices:
+                results["overall_status"] = "warning"
+            else:
+                results["overall_status"] = "healthy"
+        else:
+            results["overall_status"] = "healthy"
+        
+        logger.info(f"Health check completed: {results['overall_status']} ({len(results['issues'])} issues)")
+        return results
+    except Exception as e:
+        # Catch any unexpected errors and return error result
+        logger.error(f"Unexpected error in health check: {e}")
+        logger.error(f"Traceback: {traceback.format_exc()}")
+        results["overall_status"] = "error"
+        results["issues"].append(f"Health check failed with error: {str(e)}")
+        results["spotify_connection"]["status"] = "error"
+        results["spotify_connection"]["error"] = f"Unexpected error: {str(e)}"
+        return results
+
+def send_health_check_email(health_results: Dict[str, Any]) -> bool:
+    """
+    Send health check results via Gmail SMTP.
+    
+    Args:
+        health_results: Results from run_health_check()
+        
+    Returns:
+        True if email sent successfully, False otherwise
+    """
+    email_config = health_check_settings.get("email", {})
+    
+    if not email_config.get("enabled", False):
+        return False
+    
+    recipient = email_config.get("recipient", "")
+    app_password = email_config.get("gmail_app_password", "")
+    
+    if not recipient or not app_password:
+        logger.warning("Email notifications enabled but recipient or password not configured")
+        return False
+    
+    # Only send email if there are issues
+    issues_list = health_results.get("issues", [])
+    if health_results["overall_status"] == "healthy" and len(issues_list) == 0:
+        return False
+    
+    try:
+        import smtplib
+        from email.mime.text import MIMEText
+        from email.mime.multipart import MIMEMultipart
+        
+        # Extract sender email from recipient (assuming same account)
+        sender_email = recipient
+        
+        # Create message
+        msg = MIMEMultipart()
+        msg['From'] = sender_email
+        msg['To'] = recipient
+        msg['Subject'] = f"Wakeify Health Check Alert - {health_results['overall_status'].upper()}"
+        
+        # Build email body
+        timestamp_str = datetime.fromtimestamp(health_results['timestamp']).strftime('%Y-%m-%d %H:%M:%S')
+        
+        body_lines = [
+            f"Wakeify Health Check Results",
+            f"Timestamp: {timestamp_str}",
+            "",
+            f"Overall Status: {health_results['overall_status'].upper()}",
+            "",
+            "Spotify Connection:",
+            f"  Status: {health_results['spotify_connection']['status']}",
+            f"  Token Valid: {health_results['spotify_connection']['token_valid']}",
+            f"  API Accessible: {health_results['spotify_connection']['api_accessible']}",
+        ]
+        
+        if health_results['spotify_connection'].get('error'):
+            body_lines.append(f"  Error: {health_results['spotify_connection']['error']}")
+        
+        body_lines.append("")
+        body_lines.append("Device Status:")
+        
+        for device in health_results['devices']:
+            status_icon = "✓" if device['available_in_spotify'] else "✗"
+            body_lines.append(f"  {status_icon} {device['device_name']}")
+            body_lines.append(f"    Alarm: {device['alarm_time']} (ID: {device['alarm_id']})")
+            if device['available_in_spotify']:
+                body_lines.append(f"    Status: Available in Spotify API")
+                if device.get('is_active'):
+                    body_lines.append(f"    Active: Yes")
+            else:
+                body_lines.append(f"    Status: NOT available in Spotify API")
+            if device.get('mdns_discoverable'):
+                body_lines.append(f"    mDNS: Discoverable")
+            if device.get('issues'):
+                for issue in device['issues']:
+                    body_lines.append(f"    Issue: {issue}")
+            body_lines.append("")
+        
+        if health_results['issues']:
+            body_lines.append("Issues Found:")
+            for issue in health_results['issues']:
+                body_lines.append(f"  - {issue}")
+            body_lines.append("")
+        
+        body_lines.extend([
+            "Troubleshooting Steps:",
+            "1. Check that devices are powered on and connected to the network",
+            "2. Open Spotify app on your phone or computer",
+            "3. Look for the device in available devices list",
+            "4. Select the device and play any song to authenticate it",
+            "5. Wait a few seconds, then check again",
+            "6. Verify network connectivity if mDNS discovery fails",
+            "",
+            "If Spotify connection is lost:",
+            "1. Go to Wakeify web interface",
+            "2. Click 'Connect Spotify' to re-authenticate",
+            "3. Verify token is saved correctly",
+        ])
+        
+        body = "\n".join(body_lines)
+        msg.attach(MIMEText(body, 'plain'))
+        
+        # Send email via Gmail SMTP
+        try:
+            server = smtplib.SMTP('smtp.gmail.com', 587)
+            server.set_debuglevel(0)
+            server.starttls()
+            server.login(sender_email, app_password)
+            server.send_message(msg)
+            server.quit()
+            logger.info(f"Health check email sent successfully to {recipient}")
+            return True
+        except smtplib.SMTPAuthenticationError as e:
+            logger.error(f"Gmail authentication failed: {e}")
+            return False
+        except smtplib.SMTPException as e:
+            logger.error(f"SMTP error sending email: {e}")
+            return False
+        except Exception as e:
+            logger.error(f"Unexpected error sending email: {e}")
+            logger.error(f"Traceback: {traceback.format_exc()}")
+            return False
+            
+    except Exception as e:
+        logger.error(f"Error preparing health check email: {e}")
+        logger.error(f"Traceback: {traceback.format_exc()}")
+        return False
 
 def get_playlist_name(playlist_uri: str) -> str:
     """Get playlist name from Spotify API."""
@@ -692,7 +1048,6 @@ def run_alarm(alarm: Dict[str, Any]) -> None:
             logger.error("=" * 60)
     except Exception as e:
         logger.error(f"Error running alarm {alarm.get('id', 'unknown')}: {e}")
-        import traceback
         logger.error(f"Traceback: {traceback.format_exc()}")
 
 def prewarm_device(alarm: Dict[str, Any]) -> None:
@@ -744,6 +1099,108 @@ def prewarm_device(alarm: Dict[str, Any]) -> None:
             
     except Exception as e:
         logger.error(f"Error during prewarm for alarm {alarm.get('id', 'unknown')}: {e}")
+
+def execute_health_check():
+    """Execute health check and handle notifications."""
+    global health_check_settings
+    
+    try:
+        logger.info("Executing scheduled health check...")
+        results = run_health_check()
+        
+        # Update settings with last check results
+        health_check_settings["last_check"] = results["timestamp"]
+        health_check_settings["last_status"] = results["overall_status"]
+        save_health_check_settings()
+        
+        # Send email if enabled and issues found
+        has_issues = results["overall_status"] != "healthy" or len(results.get("issues", [])) > 0
+        if has_issues:
+            send_health_check_email(results)
+        
+        # Reschedule next health check
+        schedule_health_check()
+        
+    except Exception as e:
+        logger.error(f"Error executing health check: {e}")
+        logger.error(f"Traceback: {traceback.format_exc()}")
+
+def schedule_health_check():
+    """Schedule health check job based on settings."""
+    global scheduler, health_check_settings
+    
+    if not scheduler:
+        return
+    
+    # Remove existing health check job
+    try:
+        scheduler.remove_job("health_check")
+    except Exception:
+        pass  # Job doesn't exist yet
+    
+    # Check if health checks are enabled
+    if not health_check_settings.get("enabled", False):
+        return
+    
+    interval_days = health_check_settings.get("interval_days", 3)
+    time_str = health_check_settings.get("time", "09:00")
+    
+    try:
+        # Parse time string (HH:MM)
+        time_parts = time_str.split(":")
+        if len(time_parts) != 2:
+            logger.error(f"Invalid time format: {time_str}. Expected HH:MM")
+            return
+        
+        hour = int(time_parts[0])
+        minute = int(time_parts[1])
+        
+        if not (0 <= hour <= 23 and 0 <= minute <= 59):
+            logger.error(f"Invalid time values: hour={hour}, minute={minute}")
+            return
+        
+        # Calculate next run time
+        now = datetime.now()
+        target_time = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+        
+        # If target time is in the past today, start from tomorrow
+        if target_time <= now:
+            target_time += timedelta(days=1)
+        
+        # Calculate days until next run (accounting for interval)
+        days_until_next = interval_days
+        
+        # If we have a last_check, calculate from there
+        last_check = health_check_settings.get("last_check")
+        if last_check:
+            last_check_dt = datetime.fromtimestamp(last_check)
+            # Calculate next check from last check + interval
+            next_from_last = last_check_dt + timedelta(days=interval_days)
+            # Set time to configured time
+            next_from_last = next_from_last.replace(hour=hour, minute=minute, second=0, microsecond=0)
+            
+            # Use whichever is later: next from last check or next from today
+            if next_from_last > target_time:
+                target_time = next_from_last
+        
+        # If target time is still in the past, add interval days
+        if target_time <= now:
+            target_time += timedelta(days=interval_days)
+        
+        # Schedule the job
+        scheduler.add_job(
+            execute_health_check,
+            trigger='date',
+            run_date=target_time,
+            id="health_check",
+            replace_existing=True
+        )
+        
+        logger.info(f"Health check scheduled for {target_time.strftime('%Y-%m-%d %H:%M:%S')} (every {interval_days} days at {time_str})")
+        
+    except Exception as e:
+        logger.error(f"Error scheduling health check: {e}")
+        logger.error(f"Traceback: {traceback.format_exc()}")
 
 def schedule_alarms():
     """Schedule all alarms using APScheduler with T-60 prewarm."""
@@ -1145,9 +1602,9 @@ async def home(request: Request):
                     playlists_response = _retry_spotify_api(
                         lambda: sp.current_user_playlists(limit=50)
                     )
-                playlists = playlists_response.get('items', [])
-                playlist_cache = playlists
-                playlist_cache_timestamp = time.time()
+                    playlists = playlists_response.get('items', [])
+                    playlist_cache = playlists
+                    playlist_cache_timestamp = time.time()
                 except EOFError as e:
                     logger.error(f"EOFError getting playlists (interactive auth attempted during API call): {e}")
                     _reset_spotify_client()
@@ -1169,7 +1626,7 @@ async def home(request: Request):
         playlists = []
     except Exception as e:
         logger.error(f"Error getting playlists: {e}")
-        # Log additional context for debugging
+        # Log additional context for error diagnosis
         if not sp:
             logger.error("  Spotify client is None - authentication may be required")
         elif not _validate_token_file():
@@ -1180,9 +1637,9 @@ async def home(request: Request):
     try:
         global device_cache, device_cache_timestamp, device_cache_ttl
         
-        # Use cached devices from test page (includes all mDNS + Spotify devices)
+        # Use cached devices (includes all mDNS + Spotify devices)
         if device_cache and device_cache_timestamp and (time.time() - device_cache_timestamp) < device_cache_ttl:
-            # Use cached data (includes all devices from test page)
+            # Use cached data
             all_devices = [{
                 "name": d["name"],
                 "ip": d["ip"],
@@ -1230,14 +1687,14 @@ async def home(request: Request):
                 if sp:
                     try:
                         devices_response = _retry_spotify_api(lambda: sp.devices(), max_retries=2)
-                for dev in devices_response.get('devices', []):
-                    dev_name = dev.get('name', 'Unknown')
-                    if dev_name.upper() not in mdn_device_names:
-                        all_devices.append({
-                            "name": dev_name,
-                            "ip": None,
-                            "is_online": dev.get('is_active', False)
-                        })
+                        for dev in devices_response.get('devices', []):
+                            dev_name = dev.get('name', 'Unknown')
+                            if dev_name.upper() not in mdn_device_names:
+                                all_devices.append({
+                                    "name": dev_name,
+                                    "ip": None,
+                                    "is_online": dev.get('is_active', False)
+                                })
                     except (EOFError, spotipy.SpotifyException) as e:
                         if isinstance(e, spotipy.SpotifyException) and e.http_status == 401:
                             logger.warning("401 Unauthorized getting Spotify devices - token may be expired")
@@ -1251,6 +1708,18 @@ async def home(request: Request):
         logger.error(f"Error getting devices: {e}")
         all_devices = []
         
+    # Get health check status for UI
+    # Reload health check settings to get latest status
+    load_health_check_settings()
+    
+    # Always show health check status if available (even if None, to show "No health checks run yet")
+    # Debug logging
+    health_check_status = {
+        "last_status": health_check_settings.get("last_status"),
+        "last_check": health_check_settings.get("last_check"),
+        "has_issues": health_check_settings.get("last_status") != "healthy" if health_check_settings.get("last_status") else False
+    }
+    
     return templates.TemplateResponse("index.html", {
         "request": request,
         "alarms": alarms,
@@ -1260,7 +1729,8 @@ async def home(request: Request):
         "default_volume": DEFAULT_VOLUME,
         "default_shuffle": DEFAULT_SHUFFLE,
         "spotify_connected": True,
-        "spotify_auth_url": None
+        "spotify_auth_url": None,
+        "health_check_status": health_check_status
     })
 
 @app.get("/api/playlists")
@@ -1288,7 +1758,7 @@ async def get_playlists():
             playlists_response = _retry_spotify_api(
                 lambda: sp.current_user_playlists(limit=50)
             )
-        return {"playlists": playlists_response.get('items', [])}
+            return {"playlists": playlists_response.get('items', [])}
         except EOFError as e:
             logger.error(f"EOFError getting playlists (interactive auth attempted during API call): {e}")
             _reset_spotify_client()
@@ -1314,7 +1784,7 @@ async def get_playlists():
         raise HTTPException(status_code=401, detail="Spotify authentication required. Please re-authenticate.")
     except Exception as e:
         logger.error(f"Error getting playlists: {e}")
-        # Log additional context for debugging
+        # Log additional context for error diagnosis
         if not _validate_token_file():
             logger.error("  Token file validation failed - this may be the root cause")
         raise HTTPException(status_code=500, detail=str(e))
@@ -1475,21 +1945,21 @@ async def get_devices():
             if sp:
                 try:
                     spotify_devices = _retry_spotify_api(lambda: sp.devices(), max_retries=2)
-                for dev in spotify_devices.get('devices', []):
-                    dev_name = dev.get('name', 'Unknown')
-                    # Only add if not already in list from config or mDNS
-                    if dev_name not in device_names_seen:
-                        devices_list.append({
-                            "name": dev_name,
-                            "ip": None,
-                            "port": None,
-                            "cpath": None,
-                            "is_online": dev.get('is_active', False),
-                            "last_seen": time.time() if dev.get('is_active', False) else None,
-                            "response_time_ms": None,
-                            "error": None if dev.get('is_active', False) else "Device inactive"
-                        })
-                        device_names_seen.add(dev_name)
+                    for dev in spotify_devices.get('devices', []):
+                        dev_name = dev.get('name', 'Unknown')
+                        # Only add if not already in list from config or mDNS
+                        if dev_name not in device_names_seen:
+                            devices_list.append({
+                                "name": dev_name,
+                                "ip": None,
+                                "port": None,
+                                "cpath": None,
+                                "is_online": dev.get('is_active', False),
+                                "last_seen": time.time() if dev.get('is_active', False) else None,
+                                "response_time_ms": None,
+                                "error": None if dev.get('is_active', False) else "Device inactive"
+                            })
+                            device_names_seen.add(dev_name)
                 except (EOFError, spotipy.SpotifyException) as e:
                     if isinstance(e, spotipy.SpotifyException) and e.http_status == 401:
                         logger.warning("401 Unauthorized getting Spotify devices - token may be expired")
@@ -1519,8 +1989,7 @@ async def get_devices():
         
     except Exception as e:
         logger.error(f"Error getting devices: {e}")
-        import traceback
-        traceback.print_exc()
+        logger.error(f"Traceback: {traceback.format_exc()}")
         return {"total_devices": 0, "online_devices": 0, "offline_devices": 0, "devices": []}
 
 @app.post("/api/devices/refresh")
@@ -1564,6 +2033,149 @@ async def disconnect_spotify():
     except Exception as e:
         logger.error(f"Error disconnecting Spotify: {e}")
         raise HTTPException(status_code=500, detail="Failed to disconnect")
+
+@app.get("/api/settings/health-check")
+async def get_health_check_settings():
+    """Get health check settings."""
+    global health_check_settings
+    
+    # Return settings - password field always empty for security
+    safe_settings = health_check_settings.copy()
+    if "email" in safe_settings:
+        safe_settings["email"] = safe_settings["email"].copy()
+        # Indicate if password exists (for UI to show masked version) but don't send actual password
+        password_value = safe_settings["email"].get("gmail_app_password", "")
+        safe_settings["email"]["has_password"] = bool(password_value and password_value.strip())
+        safe_settings["email"]["gmail_app_password"] = ""  # Never return password
+    
+    # Calculate next check time if scheduled
+    next_check = None
+    if scheduler and health_check_settings.get("enabled", False):
+        try:
+            job = scheduler.get_job("health_check")
+            if job and job.next_run_time:
+                next_check = job.next_run_time.timestamp()
+        except Exception:
+            pass
+    
+    safe_settings["next_check"] = next_check
+    
+    return safe_settings
+
+@app.post("/api/settings/health-check")
+async def update_health_check_settings(request: Request):
+    """Update health check settings."""
+    global health_check_settings
+    
+    try:
+        data = await request.json()
+        
+        # Validate and update settings
+        if "enabled" in data:
+            health_check_settings["enabled"] = bool(data["enabled"])
+        
+        if "interval_days" in data:
+            interval = int(data["interval_days"])
+            if interval < 1:
+                raise HTTPException(status_code=400, detail="Interval must be at least 1 day")
+            health_check_settings["interval_days"] = interval
+        
+        if "time" in data:
+            time_str = data["time"].strip()
+            # Validate time format (HH:MM)
+            try:
+                time_parts = time_str.split(":")
+                if len(time_parts) != 2:
+                    raise ValueError("Invalid time format")
+                hour = int(time_parts[0])
+                minute = int(time_parts[1])
+                if not (0 <= hour <= 23 and 0 <= minute <= 59):
+                    raise ValueError("Invalid time values")
+                health_check_settings["time"] = time_str
+            except (ValueError, IndexError) as e:
+                raise HTTPException(status_code=400, detail=f"Invalid time format: {time_str}. Expected HH:MM")
+        
+        if "email" in data:
+            email_data = data["email"]
+            
+            # Ensure email dict exists
+            if "email" not in health_check_settings:
+                health_check_settings["email"] = {
+                    "enabled": False,
+                    "recipient": "",
+                    "gmail_app_password": ""
+                }
+            if "enabled" in email_data:
+                health_check_settings["email"]["enabled"] = bool(email_data["enabled"])
+            if "recipient" in email_data:
+                recipient = email_data["recipient"]
+                # Basic email validation
+                if recipient and "@" not in recipient:
+                    raise HTTPException(status_code=400, detail="Invalid email address format")
+                health_check_settings["email"]["recipient"] = recipient
+            if "gmail_app_password" in email_data:
+                password = email_data["gmail_app_password"]
+                if password:
+                    health_check_settings["email"]["gmail_app_password"] = str(password)
+        
+        # Save settings
+        try:
+            save_health_check_settings()
+        except Exception as save_error:
+            logger.error(f"Error saving health check settings to file: {save_error}")
+            logger.error(f"Traceback: {traceback.format_exc()}")
+            raise HTTPException(status_code=500, detail=f"Failed to save settings to file: {str(save_error)}")
+        
+        # Reschedule health check
+        try:
+            schedule_health_check()
+        except Exception as schedule_error:
+            logger.warning(f"Error rescheduling health check (settings saved): {schedule_error}")
+            # Don't fail the request if scheduling fails - settings are saved
+        
+        logger.info("Health check settings updated")
+        return {"status": "success", "message": "Settings updated"}
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error updating health check settings: {e}")
+        logger.error(f"Traceback: {traceback.format_exc()}")
+        raise HTTPException(status_code=500, detail=f"Failed to update settings: {str(e)}")
+
+@app.post("/api/settings/health-check/test")
+async def test_health_check():
+    """Run health check immediately (test mode)."""
+    try:
+        results = run_health_check()
+        
+        # Update last check
+        global health_check_settings
+        health_check_settings["last_check"] = results["timestamp"]
+        health_check_settings["last_status"] = results["overall_status"]
+        
+        try:
+            save_health_check_settings()
+        except Exception as save_error:
+            logger.error(f"Failed to save health check results: {save_error}")
+            logger.error(f"Traceback: {traceback.format_exc()}")
+            # Still return success, but log the error
+        
+        # Send email if enabled and issues found
+        overall_status = results.get("overall_status", "unknown")
+        issues_list = results.get("issues", [])
+        has_issues = overall_status != "healthy" or len(issues_list) > 0
+        
+        if has_issues:
+            send_health_check_email(results)
+        return {
+            "status": "success",
+            "results": results
+        }
+    except Exception as e:
+        logger.error(f"Error running test health check: {e}")
+        logger.error(f"Traceback: {traceback.format_exc()}")
+        raise HTTPException(status_code=500, detail=f"Failed to run health check: {str(e)}")
 
 @app.post("/set_alarm")
 async def set_alarm(
@@ -1632,7 +2244,6 @@ async def set_alarm(
             logger.info(f"Successfully saved and scheduled alarm {alarm['id']}")
         except Exception as e:
             logger.error(f"Error saving/scheduling alarm {alarm.get('id', 'unknown')}: {e}")
-            import traceback
             logger.error(f"Traceback: {traceback.format_exc()}")
         
         logger.info(f"Created alarm: {alarm['id']}")
@@ -1712,11 +2323,11 @@ async def stop_current_playback():
         # Stop playback
         try:
             _retry_spotify_api(lambda: sp.pause_playback())
-        logger.info("Stopped current playback")
-        return {"status": "success", "message": "Playback stopped"}
-    except spotipy.SpotifyException as e:
-        # Handle Spotify API errors gracefully
-        if e.http_status == 404 or "NO_ACTIVE_DEVICE" in str(e):
+            logger.info("Stopped current playback")
+            return {"status": "success", "message": "Playback stopped"}
+        except spotipy.SpotifyException as e:
+            # Handle Spotify API errors gracefully
+            if e.http_status == 404 or "NO_ACTIVE_DEVICE" in str(e):
                 return {"status": "info", "message": "No active device found"}
             elif e.http_status == 401:
                 logger.error(f"401 Unauthorized stopping playback - token expired or invalid")

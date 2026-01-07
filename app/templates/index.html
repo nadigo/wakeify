@@ -617,6 +617,17 @@
             </svg>
         </div>
 
+        <!-- Health Check Alert Banner -->
+        <div class="card warning-card" id="healthCheckAlert" style="display: none; background: #fef3c7; border-left: 4px solid #f59e0b; margin-bottom: 20px;">
+            <div style="display: flex; justify-content: space-between; align-items: center;">
+                <div>
+                    <h3 style="margin: 0 0 4px 0; color: #92400e;">⚠️ Health Check Alert</h3>
+                    <p style="margin: 0; color: #78350f; font-size: 14px;">Issues detected in last health check. Check System Status for details.</p>
+                </div>
+                <button onclick="document.getElementById('healthCheckAlert').style.display='none'" style="background: none; border: none; font-size: 20px; cursor: pointer; color: #78350f;">✕</button>
+            </div>
+        </div>
+
         {% if manual_auth_devices %}
         <div class="card warning-card">
             <h2>Manual Spotify Activation Needed</h2>
@@ -881,6 +892,41 @@
         function toggleStatusPanel() {
             const modal = document.getElementById('statusModal');
             modal.classList.add('active');
+            loadHealthCheckStatusForSystemStatus();
+        }
+        
+        async function loadHealthCheckStatusForSystemStatus() {
+            try {
+                const response = await fetch('/api/settings/health-check');
+                const settings = await response.json();
+                
+                const displayDiv = document.getElementById('healthCheckStatusDisplay');
+                if (!displayDiv) return;
+                
+                if (settings.last_status) {
+                    const statusClass = settings.last_status === 'healthy' ? 'connected' : 'disconnected';
+                    const statusText = settings.last_status.charAt(0).toUpperCase() + settings.last_status.slice(1);
+                    
+                    let html = `<div style="display: flex; align-items: center; gap: 8px;">`;
+                    html += `<span class="status-badge ${statusClass}">${statusText}</span>`;
+                    
+                    if (settings.last_check) {
+                        const date = new Date(settings.last_check * 1000);
+                        html += `<span style="color: #86868b; font-size: 12px;">${date.toLocaleString()}</span>`;
+                    }
+                    
+                    html += `</div>`;
+                    displayDiv.innerHTML = html;
+                } else {
+                    displayDiv.innerHTML = '<div style="color: #86868b;">No health checks run yet</div>';
+                }
+            } catch (error) {
+                console.error('Failed to load health check status:', error);
+                const displayDiv = document.getElementById('healthCheckStatusDisplay');
+                if (displayDiv) {
+                    displayDiv.innerHTML = '<div style="color: #86868b;">Error loading status</div>';
+                }
+            }
         }
         
         // Play alarm now
@@ -948,7 +994,34 @@
                     window.location.href = target;
                 });
             }
+            
+            // Load health check alert banner on page load
+            loadHealthCheckAlert();
         });
+        
+        async function loadHealthCheckAlert() {
+            try {
+                const response = await fetch('/api/settings/health-check');
+                const settings = await response.json();
+                
+                const alertBanner = document.getElementById('healthCheckAlert');
+                if (!alertBanner) return;
+                
+                // Show alert if there are issues (status is not healthy)
+                if (settings.last_status && settings.last_status !== 'healthy') {
+                    alertBanner.style.display = 'block';
+                } else {
+                    alertBanner.style.display = 'none';
+                }
+            } catch (error) {
+                console.error('Failed to load health check alert:', error);
+                // Hide alert on error
+                const alertBanner = document.getElementById('healthCheckAlert');
+                if (alertBanner) {
+                    alertBanner.style.display = 'none';
+                }
+            }
+        }
     </script>
     
     <!-- Status Panel Modal -->
@@ -986,6 +1059,21 @@
                 </div>
             </div>
             
+            <!-- Health Check Status -->
+            <div class="status-section">
+                <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px;">
+                    <span style="font-size: 13px; color: #86868b; font-weight: 500;">🏥 Health Check</span>
+                    <button class="icon-btn" onclick="openHealthCheckSettings()" title="Settings">
+                        <svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" style="width: 16px; height: 16px;">
+                            <path d="M19.14 12.94c.04-.3.06-.61.06-.94 0-.32-.02-.64-.07-.94l2.03-1.58c.18-.14.23-.41.12-.61l-1.92-3.32c-.12-.22-.37-.29-.59-.22l-2.39.96c-.5-.38-1.03-.7-1.62-.94l-.36-2.54c-.04-.24-.24-.41-.48-.41h-3.84c-.24 0-.43.17-.47.41l-.36 2.54c-.59.24-1.13.57-1.62.94l-2.39-.96c-.22-.08-.47 0-.59.22L2.74 8.87c-.12.21-.08.47.12.61l2.03 1.58c-.05.3-.07.62-.07.94s.02.64.07.94l-2.03 1.58c-.18.14-.23.41-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.05.24.24.41.48.41h3.84c.24 0 .44-.17.47-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32c.12-.22.07-.47-.12-.61l-2.01-1.58zM12 15.6c-1.98 0-3.6-1.62-3.6-3.6s1.62-3.6 3.6-3.6 3.6 1.62 3.6 3.6-1.62 3.6-3.6 3.6z"/>
+                        </svg>
+                    </button>
+                </div>
+                <div id="healthCheckStatusDisplay" style="font-size: 13px;">
+                    <div style="color: #86868b;">Loading...</div>
+                </div>
+            </div>
+            
             <!-- Speakers Info -->
             <div class="status-section">
                 <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px;">
@@ -1017,6 +1105,75 @@
                         <svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path d="M6 19c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7H6v12zM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4z"/></svg>
                     </button>
                     {% endif %}
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <!-- Health Check Settings Modal -->
+    <div id="healthCheckSettingsModal" class="modal-overlay" onclick="closeHealthCheckSettings(event)" style="display: none;">
+        <div class="modal-content status-modal" onclick="event.stopPropagation()" style="max-width: 500px;">
+            <div class="modal-header">
+                <h2 class="modal-title">Health Check Settings</h2>
+                <button class="modal-close" onclick="closeHealthCheckSettings()">✕</button>
+            </div>
+            
+            <div style="padding: 20px;">
+                <div style="margin-bottom: 20px;">
+                    <label style="display: flex; align-items: center; gap: 8px; margin-bottom: 8px;">
+                        <input type="checkbox" id="healthCheckEnabled" onchange="updateHealthCheckUI()">
+                        <span style="font-weight: 600;">Enable Health Checks</span>
+                    </label>
+                    <p style="font-size: 13px; color: #86868b; margin: 4px 0 0 24px;">
+                        Automatically check Spotify connection and device availability
+                    </p>
+                </div>
+                
+                <div id="healthCheckSettings" style="display: none;">
+                    <div style="margin-bottom: 16px;">
+                        <label style="display: block; margin-bottom: 6px; font-weight: 500;">Check Interval (days)</label>
+                        <input type="number" id="healthCheckInterval" min="1" value="3" style="width: 100%; padding: 8px; border: 1px solid #d1d1d6; border-radius: 6px;">
+                    </div>
+                    
+                    <div style="margin-bottom: 16px;">
+                        <label style="display: block; margin-bottom: 6px; font-weight: 500;">Check Time (HH:MM)</label>
+                        <input type="time" id="healthCheckTime" value="09:00" style="width: 100%; padding: 8px; border: 1px solid #d1d1d6; border-radius: 6px;">
+                    </div>
+                    
+                    <div style="margin-bottom: 20px; padding: 12px; background: #f5f5f7; border-radius: 8px;">
+                        <label style="display: flex; align-items: center; gap: 8px; margin-bottom: 8px;">
+                            <input type="checkbox" id="emailEnabled" onchange="updateEmailUI()">
+                            <span style="font-weight: 600;">Enable Email Notifications</span>
+                        </label>
+                        <div id="emailSettings" style="display: none; margin-top: 12px; margin-left: 24px;">
+                            <div style="margin-bottom: 12px;">
+                                <label style="display: block; margin-bottom: 6px; font-weight: 500;">Email Recipient</label>
+                                <input type="email" id="emailRecipient" placeholder="your@email.com" style="width: 100%; padding: 8px; border: 1px solid #d1d1d6; border-radius: 6px;">
+                            </div>
+                            <div style="margin-bottom: 12px;">
+                                <label style="display: block; margin-bottom: 6px; font-weight: 500;">Gmail App Password</label>
+                                <input type="text" id="gmailPassword" placeholder="" style="width: 100%; padding: 8px; border: 1px solid #d1d1d6; border-radius: 6px; font-family: monospace;" onfocus="if(this.value === '••••••••••••••••' || this.getAttribute('data-has-password') === 'true') { this.value = ''; this.removeAttribute('data-has-password'); }">
+                                <p style="font-size: 12px; color: #86868b; margin-top: 4px;">
+                                    Get app password from <a href="https://myaccount.google.com/apppasswords" target="_blank" style="color: #3b82f6;">Google Account Settings</a>
+                                </p>
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <div style="margin-bottom: 16px; padding: 12px; background: #f0f9ff; border-radius: 8px; font-size: 13px;">
+                        <div style="margin-bottom: 8px;"><strong>Last Check:</strong> <span id="lastCheckDisplay">Never</span></div>
+                        <div><strong>Status:</strong> <span id="lastStatusDisplay">-</span></div>
+                        <div style="margin-top: 8px;"><strong>Next Check:</strong> <span id="nextCheckDisplay">-</span></div>
+                    </div>
+                    
+                    <div style="display: flex; gap: 8px;">
+                        <button onclick="testHealthCheck()" style="flex: 1; padding: 10px; background: #3b82f6; color: white; border: none; border-radius: 6px; cursor: pointer; font-weight: 500;">
+                            Test Now
+                        </button>
+                        <button onclick="saveHealthCheckSettings()" style="flex: 1; padding: 10px; background: #10b981; color: white; border: none; border-radius: 6px; cursor: pointer; font-weight: 500;">
+                            Save Settings
+                        </button>
+                    </div>
                 </div>
             </div>
         </div>
@@ -1073,6 +1230,170 @@
                 location.reload();
             } catch (error) {
                 alert('Failed to disconnect Spotify');
+            }
+        }
+        
+        // Health Check Settings Functions
+        function openHealthCheckSettings() {
+            loadHealthCheckSettings();
+            document.getElementById('healthCheckSettingsModal').style.display = 'flex';
+        }
+        
+        function closeHealthCheckSettings(event) {
+            const modal = document.getElementById('healthCheckSettingsModal');
+            if (event && modal.contains(event.target) && !event.target.closest('.modal-content')) {
+                return;
+            }
+            modal.style.display = 'none';
+        }
+        
+        async function loadHealthCheckSettings() {
+            try {
+                const response = await fetch('/api/settings/health-check');
+                const settings = await response.json();
+                
+                document.getElementById('healthCheckEnabled').checked = settings.enabled || false;
+                document.getElementById('healthCheckInterval').value = settings.interval_days || 3;
+                document.getElementById('healthCheckTime').value = settings.time || '09:00';
+                document.getElementById('emailEnabled').checked = settings.email?.enabled || false;
+                document.getElementById('emailRecipient').value = settings.email?.recipient || '';
+                
+                // Show masked password if one exists (for display only)
+                const passwordField = document.getElementById('gmailPassword');
+                if (settings.email?.has_password) {
+                    passwordField.value = '••••••••••••••••'; // 16 dots to match Gmail app password length
+                    passwordField.setAttribute('data-has-password', 'true');
+                } else {
+                    passwordField.value = '';
+                    passwordField.removeAttribute('data-has-password');
+                }
+                
+                if (settings.last_check) {
+                    const date = new Date(settings.last_check * 1000);
+                    document.getElementById('lastCheckDisplay').textContent = date.toLocaleString();
+                } else {
+                    document.getElementById('lastCheckDisplay').textContent = 'Never';
+                }
+                
+                document.getElementById('lastStatusDisplay').textContent = settings.last_status ? settings.last_status.charAt(0).toUpperCase() + settings.last_status.slice(1) : '-';
+                
+                if (settings.next_check) {
+                    const date = new Date(settings.next_check * 1000);
+                    document.getElementById('nextCheckDisplay').textContent = date.toLocaleString();
+                } else {
+                    document.getElementById('nextCheckDisplay').textContent = '-';
+                }
+                
+                updateHealthCheckUI();
+                updateEmailUI();
+            } catch (error) {
+                console.error('Failed to load health check settings:', error);
+                alert('Failed to load settings');
+            }
+        }
+        
+        function updateHealthCheckUI() {
+            const enabled = document.getElementById('healthCheckEnabled').checked;
+            document.getElementById('healthCheckSettings').style.display = enabled ? 'block' : 'none';
+        }
+        
+        function updateEmailUI() {
+            const enabled = document.getElementById('emailEnabled').checked;
+            document.getElementById('emailSettings').style.display = enabled ? 'block' : 'none';
+        }
+        
+        async function saveHealthCheckSettings() {
+            try {
+                const passwordField = document.getElementById('gmailPassword');
+                // Only send password if user entered a new one (not the masked placeholder)
+                const passwordValue = passwordField.value;
+                const isMaskedPassword = passwordField.getAttribute('data-has-password') === 'true' && passwordValue === '••••••••••••••••';
+                
+                const settings = {
+                    enabled: document.getElementById('healthCheckEnabled').checked,
+                    interval_days: parseInt(document.getElementById('healthCheckInterval').value) || 3,
+                    time: document.getElementById('healthCheckTime').value || '09:00',
+                    email: {
+                        enabled: document.getElementById('emailEnabled').checked,
+                        recipient: document.getElementById('emailRecipient').value.trim(),
+                        gmail_app_password: isMaskedPassword ? '' : passwordValue.trim() // Don't send masked placeholder
+                    }
+                };
+                
+                const response = await fetch('/api/settings/health-check', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(settings)
+                });
+                
+                if (!response.ok) {
+                    const errorData = await response.json();
+                    alert('Failed to save: ' + (errorData.detail || 'Unknown error'));
+                    return;
+                }
+                
+                alert('Settings saved successfully!');
+                document.getElementById('gmailPassword').value = '';
+                loadHealthCheckSettings();
+                loadHealthCheckAlert(); // Update alert banner after settings change
+            } catch (error) {
+                alert('Error: ' + error.message);
+                console.error('Save error:', error);
+            }
+        }
+        
+        async function testHealthCheck() {
+            const button = event.target;
+            try {
+                button.disabled = true;
+                button.textContent = 'Running...';
+                
+                const response = await fetch('/api/settings/health-check/test', {
+                    method: 'POST'
+                });
+                
+                // Check if response is OK
+                if (!response.ok) {
+                    // Try to get error message from response
+                    let errorMessage = 'Unknown error';
+                    try {
+                        const errorData = await response.json();
+                        errorMessage = errorData.detail || errorData.error || errorData.message || `HTTP ${response.status}`;
+                    } catch (e) {
+                        errorMessage = `HTTP ${response.status}: ${response.statusText}`;
+                    }
+                    alert('Health check failed: ' + errorMessage);
+                    button.disabled = false;
+                    button.textContent = 'Test Now';
+                    return;
+                }
+                
+                const result = await response.json();
+                if (result.status === 'success') {
+                    const status = result.results?.overall_status || 'unknown';
+                    const issueCount = result.results?.issues?.length || 0;
+                    let message = 'Health check completed! Status: ' + status;
+                    if (issueCount > 0) {
+                        message += `\n\nFound ${issueCount} issue(s):\n${result.results.issues.slice(0, 3).join('\n')}`;
+                        if (issueCount > 3) {
+                            message += `\n... and ${issueCount - 3} more`;
+                        }
+                    }
+                    alert(message);
+                    loadHealthCheckSettings(); // Reload to show updated status
+                    loadHealthCheckAlert(); // Update alert banner
+                    loadHealthCheckStatusForSystemStatus(); // Update system status display
+                } else {
+                    alert('Health check failed: ' + (result.error || result.detail || 'Unknown error'));
+                }
+                
+                button.disabled = false;
+                button.textContent = 'Test Now';
+            } catch (error) {
+                console.error('Failed to run health check:', error);
+                alert('Failed to run health check: ' + (error.message || 'Network error'));
+                button.disabled = false;
+                button.textContent = 'Test Now';
             }
         }
     </script>
