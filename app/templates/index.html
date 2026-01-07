@@ -1241,9 +1241,11 @@
         
         function closeHealthCheckSettings(event) {
             const modal = document.getElementById('healthCheckSettingsModal');
-            if (event && modal.contains(event.target) && !event.target.closest('.modal-content')) {
+            // If clicking inside modal-content, don't close (let stopPropagation handle it)
+            if (event && event.target.closest('.modal-content')) {
                 return;
             }
+            // Close modal when clicking overlay or when called directly (e.g., X button)
             modal.style.display = 'none';
         }
         
